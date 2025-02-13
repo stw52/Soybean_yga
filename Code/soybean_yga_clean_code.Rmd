@@ -1,0 +1,382 @@
+---
+title: "Soybean Yield Gap Analysis Clean Code"
+author: "Sam Wallace"
+date: "2025-01-31"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This markdown includes "clean", as in more direct code of the R code files in the Soybean_yga/Code folder for more centralized and cleaner use in analysis. R markdown is created by Sam Wallace
+
+```{r Libraries,echo=F}
+library(tidyverse)
+library(emmeans)
+library(lme4)
+library(modelr)
+library(ggpmisc)
+library(lmerTest)
+library(glmmTMB)
+library(DHARMa)
+library(shades)
+library(meta)
+library(metafor)
+library(here)
+library(ggpubr)
+library(performance)
+library(janitor)
+library(fitdistrplus)
+
+options(contrasts = c("contr.sum", "contr.poly")) #setting contrasts
+```
+
+
+```{r Read in PRISM weather data}
+#### PRISM weather data was extracted from python based API provided by Ben Eck from NRCC. The files here are raw data from there and are cleaned in this chunk.
+
+PrismRaw2Clean <- function(csvpath, location){
+  
+  # Reads in raw file based on the file path including the file name and .csv. The here function is locating the r project location, so anything in the path will come after the project location in your file path.
+  raw_prism = read_csv(here(csvpath))
+  colnames(raw_prism) = c("date", "maxt", "mint", "prcp")
+  raw_prism$date <- as.Date(raw_prism$date, format = "%m/%d/%Y")
+  
+  # This converts the english units from PRISM into metric and also finds the day of year for each entry.
+  # Location input is the experimental site to use later in joins
+  f_to_c <- 5/9
+  clean_prism <- raw_prism %>%
+    mutate(Year = year(date),
+           doy = yday(date),
+           maxt_c = (maxt-32)*f_to_c,
+           mint_c = (mint-32)*f_to_c,
+           prcp_cm = prcp*2.54,
+           Location = rep(location ,nrow(raw_prism))) %>%
+  dplyr::select(Year, date, doy, maxt_c, mint_c, prcp_cm, Location) %>%
+    filter(Year > 1980)
+  return(clean_prism)
+}
+
+# Now you can get your metric prism data for each location by just referencing the file path
+musgrave_prism <- PrismRaw2Clean(csvpath = "R_data/Weather_data/PRISM/Raw_prism_files/musgrave_prism.csv", location = "Musgrave")
+geneva_prism <- PrismRaw2Clean(csvpath = "R_data/Weather_data/PRISM/Raw_prism_files/geneva_prism.csv", location = "Geneva")
+arlington_prism <- PrismRaw2Clean(csvpath = "R_data/Weather_data/PRISM/Raw_prism_files/arlington_prism.csv", location = "AARS")
+psu_prism <- PrismRaw2Clean(csvpath = "R_data/Weather_data/PRISM/Raw_prism_files/psu_prism.csv", location = "Rock Springs")
+```
+
+```{r Precipitation Frequency Analysis}
+
+prism_list <- list(musgrave_prism, arlington_prism, geneva_prism, psu_prism)
+
+process_weather_data <- function(weather_data) {
+  
+  # Define the three 30-year periods (adjust according to your data range)
+  periods <- list(
+    "early" <- 1981:1995,
+  "middle" <- 1996:2010,
+  "late" <- 2011:2024
+  )
+  
+  # Function to calculate annual maxima for each period
+  calculate_annual_max <- function(year_range) {
+    weather_data %>%
+      filter(Year %in% year_range) %>%
+      group_by(Year) %>%
+      summarize(max_precip = max(prcp_cm, na.rm = TRUE))
+  }
+  
+  # Get annual maxima for each period
+  annual_max_list <- lapply(periods, calculate_annual_max)
+  
+  # Function to fit lognormal distribution and calculate return levels
+  fit_lognormal <- function(annual_max) {
+    annual_max <- annual_max$max_precip[annual_max$max_precip > 0]  # Remove zero or negative values
+    
+    fit <- fitdist(annual_max, "lnorm")  # Fit lognormal distribution
+    return(fit)
+  }
+  
+  # Fit lognormal distribution to each period
+  lognormal_fits <- lapply(annual_max_list, fit_lognormal)
+  
+  # Calculate return levels
+  return_periods <- c(5, 10, 15, 20, 25, 30)
+  
+  calculate_return_levels <- function(fit) {
+    # Extract parameters
+    meanlog <- fit$estimate["meanlog"]
+    sdlog <- fit$estimate["sdlog"]
+    
+    # Calculate return levels
+    return_levels <- qlnorm(1 - (1 / return_periods), meanlog = meanlog, sdlog = sdlog)
+    
+    # Return levels as a data frame
+    data.frame(
+      Return_Period = return_periods,
+      Return_Level = return_levels
+    )
+  }
+  
+  # Calculate return levels for each period
+  return_levels_list <- lapply(lognormal_fits, calculate_return_levels)
+  
+  # Combine results into a single data frame for all periods
+  return_levels_df <- bind_rows(
+    data.frame(Period = "early", return_levels_list[[1]]),
+    data.frame(Period = "middle", return_levels_list[[2]]),
+    data.frame(Period = "late", return_levels_list[[3]])
+  )
+  
+  return(return_levels_df)
+}
+
+return_times_sites <- lapply(prism_list, process_weather_data)
+
+combined_results <- bind_rows(
+  lapply(seq_along(return_times_sites), function(i) {
+    data.frame(Data_Set = paste("Data", i), return_times_sites[[i]])
+  })
+)
+
+combined_results <- combined_results %>%
+  mutate(site = case_match(Data_Set, 
+                           "Data 1" ~ "Musgrave",
+                           "Data 2" ~ "AARS",
+                           "Data 3" ~ "Geneva",
+                           "Data 4" ~ "Rock Springs"))
+
+# Plot rainfall distributions of return times for each site and color dots by the time period
+combined_results %>%
+  ggplot(aes(x = Return_Period, y = Return_Level, color = Period)) +
+  geom_point() +
+  geom_line() +
+  facet_wrap(~site) + 
+  theme_bw() +
+  labs(y = "Daily Precipitation Amount (cm)",x = "Return period (Years)", legend = "Time period" )
+
+```
+
+
+```{r Read in soybean agronomic data}
+# Read in all soybean data from raw file
+soy_rye_raw <- read_csv(here("R_data/Soy_rye_data/NY_WI_NTvT_master.csv"))
+
+# Select only rows that can be useful for further analysis
+# Also editing experiment name for 2018 so I can model it differently
+soy_rye_useful <- soy_rye_raw %>%
+  mutate(ExperimentName = case_when(Field == "RN30" ~ "White Mold",
+                                    Field == "RN20" ~ "White Mold",
+                                    .default = ExperimentName)) %>%
+  select(Year, State, Location, ExperimentName, Rep, SoySeedingDate, Till_NT,
+         RyeBiomass_kgha, SoyStand_ha, Per_Emergence, WeedBiomass_kgha, Yield_Mgha, Yield_buac, ExperimentalTrt) %>%
+  filter(ExperimentName != "CIG NT Soybeans") %>%
+  mutate(SoySeedingDate = as.Date(SoySeedingDate, format = "%m/%d/%y")) %>%
+  filter(SoySeedingDate != "2019-10-06") %>%
+  mutate(ExperimentName = case_when(SoySeedingDate == "2018-06-06"~ "No-Till Soy Split Plot",
+                                    .default = ExperimentName),
+         Location = case_when(State == "PA" ~ "Rock Springs", .default = Location))
+
+
+# Count number of no-till and tilled plots for each experiment and year of the experiment
+nt_t_counts <- soy_rye_useful %>%
+  group_by(ExperimentName, Year) %>%
+  mutate(nt_count = sum(Till_NT == "NT")) %>%
+  mutate(till_count = sum(Till_NT == "Till")) %>%
+  distinct(ExperimentName, till_count, nt_count)
+```
+
+```{r Functions to get meta analysis independent variables}
+#### These functions are for getting independent variables for later use in meta analysis, such as precip before and after planting, GDD, etc. These are variables that are climatically based and vary by site year
+planting_precip <- function(met_df, mgmt_df, station_site){
+
+  # met_df: Dataframe that includes precipitation data, year, and date at least to calculate precipitation around planting.
+  # mgmt_df: Dataframe that includes soybean management and agronomic information, including planting date
+  # station_site: String input for the name of experimental site (Musgrave, Arlington, Geneva, PSU, etc.)
+
+# Find planting dates for the location for each experiment and year
+  planting_dates <- mgmt_df %>%
+    group_by(Year, Location) %>%
+    slice_min(SoySeedingDate) %>%
+    ungroup() %>%
+    filter(Location == station_site) %>%
+    select(ExperimentName, Year, State, Location, SoySeedingDate) %>%
+    distinct()
+  
+  exp_df <- left_join(met_df, planting_dates, by = c("Year","Location")) %>%
+    mutate(plant_doy = yday(SoySeedingDate))
+#### Calculates the precipitation +/- 15 days around planting period for each planting date at the site 
+  plant_prcp <- exp_df %>%
+    filter(!is.na(SoySeedingDate) & doy >= plant_doy - 15 & doy<= plant_doy + 15) %>%
+    group_by(ExperimentName, Year, State, Location, SoySeedingDate) %>%
+    summarise(plant_prcp = sum(prcp_cm, na.rm = T), .groups = "drop")
+  return(plant_prcp)
+}
+
+#More functions to come depending on variables that we investigate, but format will be similar regardless of variable
+musgrave_plant_prcp <- planting_precip(met_df = musgrave_prism, mgmt_df = soy_rye_useful, station_site = "Musgrave")
+wi_plant_prcp <- planting_precip(met_df = arlington_prism, mgmt_df = soy_rye_useful, station_site = "AARS")
+geneva_plant_prcp <- planting_precip(met_df = geneva_prism, mgmt_df = soy_rye_useful, station_site = "Geneva")
+psu_plant_prcp <- planting_precip(met_df = psu_prism,
+                                  mgmt_df = soy_rye_useful, 
+                                  station_site = "Rock Springs")
+
+all_plant_prcp <- rbind(musgrave_plant_prcp, wi_plant_prcp, geneva_plant_prcp, psu_plant_prcp)
+comb_soy_prcp <- left_join(soy_rye_useful, all_plant_prcp, by = c("Year", "State", "Location", "ExperimentName"))
+```
+
+```{r Function to get each experiments yield data set up for meta analysis}
+
+get_model_inputs <- function(soy_data, experiment_name){
+  # This function gets the data for each individual experiment to be used for creating each model
+  model_input <- soy_data %>%
+    filter(ExperimentName %in% experiment_name) %>%
+    drop_na(Year) %>%
+    mutate(Year = as.factor(Year)) %>%
+    mutate(block = Rep)
+}  
+ 
+experiment_names <- unique(comb_soy_prcp$ExperimentName)
+
+# For loop below used to easily extract each dataframe for my experiments
+input_list <- list()
+for(i in 1:length(experiment_names)){
+  input_list[[i]] <- get_model_inputs(comb_soy_prcp, experiment_names[i])
+  clean_name <- gsub("[^a-zA-Z0-9]", "_", tolower(experiment_names[i]))
+  df_name <- paste0(clean_name, "_inputs")
+  assign(df_name, input_list[[i]])
+}
+
+```
+
+```{r Creating Mixed Models}
+# Models will be created outside of functions or loops to ensure good model fitting techniques
+
+# Barns
+barns_mod <- lmer(log(Yield_Mgha) ~ Till_NT*Year + (1|Year:block), data = barns_inputs)
+barns_glm <- glmmTMB(Yield_Mgha ~ Till_NT*Year + (1|Year:block),
+                        family = tweedie(link = "log"),
+                        data = barns_inputs)
+summary(barns_glm)
+simulateResiduals(barns_glm, plot = TRUE)
+
+# MOSS 
+moss_mod <- lmer(log(Yield_Mgha) ~ Till_NT*Year + (1|Year:block), data = moss_inputs)
+summary(moss_mod)
+anova(moss_mod, ddf = "Kenward-Roger")
+check_model(moss_mod)
+```
+
+ exp_mod <- if(length(unique(soy_data$Year[soy_data$ExperimentName %in% experiment_name])) > 1){
+        lmer(log(Yield_Mgha) ~ as.factor(Till_NT)*as.factor(Year) + (1|Year:block) + (1:Year), data = model_input)
+  } else{
+    lmer(log(Yield_Mgha) ~ as.factor(Till_NT)*Year + (1|block), data = model_input)
+  }
+```{r Getting model contrasts}
+get_model_contrasts <- function(exp_model, experiment_name){
+  # Function takes input of a model and experiment name to get out the contrasts from emmeans
+  mod_emm <- emmeans(exp_mod,pairwise ~Till_NT|Year)
+ 
+  contrast_df <- as.data.frame(mod_emm$contrasts) %>%
+    select(Year, estimate, SE) %>%
+    mutate(ExperimentName = experiment_name) %>%
+    rename(yield_gap = estimate)
+  
+  return(contrast_df)
+}  
+
+# Run function for all of my data
+emm_list <- list()
+for(i in 1:length(experiment_names)){
+  emm_list[[i]] <- get_model_contrasts(model_list[i],exp)
+}
+```
+
+
+
+barns_emm <- get_soy_model(comb_soy_prcp, experiment_name = "BARNS")
+moss_emm <- get_soy_model(comb_soy_prcp, experiment_name = "MOSS")
+ocs_emm <- get_soy_model(comb_soy_prcp, experiment_name = "OCS")
+coulter_emm <- get_soy_model(comb_soy_prcp, experiment_name = "Coulter Study")
+sf_emm <- get_soy_model(comb_soy_prcp, experiment_name = "Starter Fertilizer Study")
+sd_emm <- get_soy_model(comb_soy_prcp, experiment_name = "Seeding Depth Study")
+mowtivation_emm <- get_soy_model(comb_soy_prcp, experiment_name = "Mowtivation")
+wi_nt_soy_emm <- get_soy_model(comb_soy_prcp, experiment_name = "No-Till Soybeans")
+wi_ccbrt_emm <- get_soy_model(comb_soy_prcp, experiment_name = "CCBRT Soybean")
+rose2_emm <- get_soy_model(comb_soy_prcp, experiment_name = "ROSE2")
+rose3_emm <- get_soy_model(comb_soy_prcp, experiment_name = "ROSE3")
+
+# Separate model for WI 2018 split plot setup
+wi_2018 <- comb_soy_prcp %>%
+  filter(ExperimentName == "No-Till Soy Split Plot") %>%
+  separate_wider_delim(ExperimentalTrt, delim = " ", names = c("main_plot","split_plot"))
+wi_2018_mod <- lmer(log(Yield_Mgha) ~ as.factor(Till_NT)*Year + (1|Rep:main_plot) + (1:Rep), data = wi_2018)
+hist(residuals(wi_2018_mod))
+plot(residuals(wi_2018_mod)~predict(wi_2018_mod))
+wi_2018_emm <- emmeans(wi_2018_mod, pairwise ~ Till_NT|Year)
+wi_2018_contrast <- as.data.frame(wi_2018_emm$contrasts) %>%
+    select(Year, estimate, SE) %>%
+    mutate(ExperimentName = "No-Till Soy Split Plot") %>%
+    rename(yield_gap = estimate)
+
+
+# Combine all of the contrasts into one dataframe
+total_contrasts <- rbind(barns_emm[[1]], moss_emm[[1]], ocs_emm[[1]],
+                         mowtivation_emm[[1]], coulter_emm[[1]], sf_emm[[1]], sd_emm[[1]],
+                         wi_nt_soy_emm[[1]], wi_ccbrt_emm[[1]], wi_2018_contrast,
+                         rose2_emm[[1]], rose3_emm[[1]])
+
+```
+
+```{r Meta analysis work}
+# Create inpput for meta analysis
+meta_input <- left_join(total_contrasts, comb_soy_prcp) %>%
+  select(Year, State, Location, ExperimentName, SoySeedingDate.y, yield_gap, SE, plant_prcp) %>%
+  rename("SoySeedingDate" = SoySeedingDate.y) %>%
+  mutate(site_year = paste0(State, "-", Year)) %>%
+  distinct()
+
+meta_input$SoySeedingDate[meta_input$ExperimentName == "Starter Fertilizer Study"] = as.Date("2021-06-04", format = "%Y-%m-%d")
+meta_input$plant_prcp[meta_input$ExperimentName == "Starter Fertilizer Study"] = 7.44
+
+
+# Run the meta analysis
+metagen_analysis <- metagen(data = meta_input, TE = yield_gap, seTE = SE, studlab = site_year)
+
+# Save the results into this dataframe
+metagen_result <- data.frame(
+  effect_size = metagen_analysis$TE,  # Treatment effect
+  ci_lower = metagen_analysis$lower,  # Lower bound of confidence interval
+  ci_upper = metagen_analysis$upper,  # Upper bound of confidence interval
+  i2 = metagen_analysis$I2            # I² for heterogeneity
+)
+
+# Combine with identifying data and rainfall data
+metagen_result_comb <- cbind(metagen_result, meta_input)
+
+# Transform the outputs to a linear scale from the log scale
+metagen_result_final_1 <- metagen_result_comb %>%
+  mutate(yield_ratio = exp(yield_gap),
+         lowerci_trans = exp(ci_lower),
+         upperci_trans = exp(ci_upper)) %>%
+  filter(site_year != "PA-2016" & site_year != "PA-2023" & site_year != "PA-2022")
+
+# Plot the output of the meta analysis
+ratio_yg_meta_1 <- metagen_result_final_1 %>%
+  ggplot(aes(x = plant_prcp, y = yield_ratio))+
+  geom_point(aes(color = State), size = 2) +
+  geom_errorbar(aes(ymin = lowerci_trans, ymax = upperci_trans, colour = State), width = 0.2) + # Error bars for CI
+  #geom_text(aes(label  = site_year)) +
+  labs(x = "Precipitation accumulation +/- 15 days of planting (cm)",
+       y = "Ratio of no-till yield to tilled yield",
+       color = "") +
+  stat_poly_eq(formula = y~x, use_label(c("R2", "eq")), size = 5)+
+  theme_pubr() +
+  scale_color_manual(values = c("black", "slateblue", "red")) +
+  geom_smooth(method = "lm",formula = y ~ x,  se = FALSE, color = "gray", 
+              linetype = "dashed")  +
+  theme(axis.title = element_text(size = 18),
+        axis.text = element_text(size = 16),
+        legend.text = element_text(size = 16),
+        legend.title = element_text(size = 16))
+```

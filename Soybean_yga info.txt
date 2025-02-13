@@ -1,0 +1,1 @@
+Soybean_yga serves as the R project for the soybean yield gap analysis. The primary owner of this project is Sam Wallace.
