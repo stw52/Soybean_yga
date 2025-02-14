@@ -11,7 +11,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 This markdown includes "clean", as in more direct code of the R code files in the Soybean_yga/Code folder for more centralized and cleaner use in analysis. R markdown is created by Sam Wallace
 
-```{r Libraries,echo=F}
+```{r Libraries,echo=F,results=F}
 library(tidyverse)
 library(emmeans)
 library(lme4)
@@ -66,16 +66,15 @@ psu_prism <- PrismRaw2Clean(csvpath = "R_data/Weather_data/PRISM/Raw_prism_files
 ```
 
 ```{r Precipitation Frequency Analysis}
-
+# Code to check 
 prism_list <- list(musgrave_prism, arlington_prism, geneva_prism, psu_prism)
 
 process_weather_data <- function(weather_data) {
   
-  # Define the three 30-year periods (adjust according to your data range)
+  
   periods <- list(
-    "early" <- 1981:1995,
-  "middle" <- 1996:2010,
-  "late" <- 2011:2024
+  "1981 - 2002" <- 1981:2002,
+  "2003 - 2024" <- 2003:2024
   )
   
   # Function to calculate annual maxima for each period
@@ -83,7 +82,7 @@ process_weather_data <- function(weather_data) {
     weather_data %>%
       filter(Year %in% year_range) %>%
       group_by(Year) %>%
-      summarize(max_precip = max(prcp_cm, na.rm = TRUE))
+      summarize(max_precip = max(prcp_cm*1.13, na.rm = TRUE))
   }
   
   # Get annual maxima for each period
@@ -91,7 +90,7 @@ process_weather_data <- function(weather_data) {
   
   # Function to fit lognormal distribution and calculate return levels
   fit_lognormal <- function(annual_max) {
-    annual_max <- annual_max$max_precip[annual_max$max_precip > 0]  # Remove zero or negative values
+    annual_max <- annual_max$max_precip[annual_max$max_precip > 0]
     
     fit <- fitdist(annual_max, "lnorm")  # Fit lognormal distribution
     return(fit)
@@ -101,7 +100,7 @@ process_weather_data <- function(weather_data) {
   lognormal_fits <- lapply(annual_max_list, fit_lognormal)
   
   # Calculate return levels
-  return_periods <- c(5, 10, 15, 20, 25, 30)
+  return_periods <- seq(5,100,5)
   
   calculate_return_levels <- function(fit) {
     # Extract parameters
@@ -123,10 +122,9 @@ process_weather_data <- function(weather_data) {
   
   # Combine results into a single data frame for all periods
   return_levels_df <- bind_rows(
-    data.frame(Period = "early", return_levels_list[[1]]),
-    data.frame(Period = "middle", return_levels_list[[2]]),
-    data.frame(Period = "late", return_levels_list[[3]])
-  )
+    data.frame(Period = "1981 - 2002", return_levels_list[[1]]),
+    data.frame(Period = "2003 - 2024", return_levels_list[[2]]
+  ))
   
   return(return_levels_df)
 }
@@ -147,14 +145,15 @@ combined_results <- combined_results %>%
                            "Data 4" ~ "Rock Springs"))
 
 # Plot rainfall distributions of return times for each site and color dots by the time period
-combined_results %>%
+precip_freq <- combined_results %>%
   ggplot(aes(x = Return_Period, y = Return_Level, color = Period)) +
   geom_point() +
   geom_line() +
   facet_wrap(~site) + 
   theme_bw() +
-  labs(y = "Daily Precipitation Amount (cm)",x = "Return period (Years)", legend = "Time period" )
-
+  theme(legend.position = "top") +
+  labs(y = "1-Day precipitation event (cm)",x = "Return period (Years)", color = "" )
+ggsave(precip_freq, filename = here("Figures/prcp_freq_sites.pdf"),dpi = 300, useDingbats=F)
 ```
 
 
@@ -168,7 +167,7 @@ soy_rye_useful <- soy_rye_raw %>%
   mutate(ExperimentName = case_when(Field == "RN30" ~ "White Mold",
                                     Field == "RN20" ~ "White Mold",
                                     .default = ExperimentName)) %>%
-  select(Year, State, Location, ExperimentName, Rep, SoySeedingDate, Till_NT,
+  dplyr::select(Year, State, Location, ExperimentName, Rep, SoySeedingDate, Till_NT,
          RyeBiomass_kgha, SoyStand_ha, Per_Emergence, WeedBiomass_kgha, Yield_Mgha, Yield_buac, ExperimentalTrt) %>%
   filter(ExperimentName != "CIG NT Soybeans") %>%
   mutate(SoySeedingDate = as.Date(SoySeedingDate, format = "%m/%d/%y")) %>%
@@ -200,7 +199,7 @@ planting_precip <- function(met_df, mgmt_df, station_site){
     slice_min(SoySeedingDate) %>%
     ungroup() %>%
     filter(Location == station_site) %>%
-    select(ExperimentName, Year, State, Location, SoySeedingDate) %>%
+    dplyr::select(ExperimentName, Year, State, Location, SoySeedingDate) %>%
     distinct()
   
   exp_df <- left_join(met_df, planting_dates, by = c("Year","Location")) %>%
@@ -234,7 +233,7 @@ get_model_inputs <- function(soy_data, experiment_name){
     drop_na(Year) %>%
     mutate(Year = as.factor(Year)) %>%
     mutate(block = Rep)
-}  
+}
  
 experiment_names <- unique(comb_soy_prcp$ExperimentName)
 
@@ -253,18 +252,22 @@ for(i in 1:length(experiment_names)){
 # Models will be created outside of functions or loops to ensure good model fitting techniques
 
 # Barns
+
 barns_mod <- lmer(log(Yield_Mgha) ~ Till_NT*Year + (1|Year:block), data = barns_inputs)
 barns_glm <- glmmTMB(Yield_Mgha ~ Till_NT*Year + (1|Year:block),
-                        family = tweedie(link = "log"),
+                        family = gaussian(link = "log"),
                         data = barns_inputs)
 summary(barns_glm)
 simulateResiduals(barns_glm, plot = TRUE)
+check_model(barns_glm)
 
 # MOSS 
 moss_mod <- lmer(log(Yield_Mgha) ~ Till_NT*Year + (1|Year:block), data = moss_inputs)
 summary(moss_mod)
 anova(moss_mod, ddf = "Kenward-Roger")
 check_model(moss_mod)
+
+#change to be seen in git
 ```
 
  exp_mod <- if(length(unique(soy_data$Year[soy_data$ExperimentName %in% experiment_name])) > 1){
@@ -288,7 +291,7 @@ get_model_contrasts <- function(exp_model, experiment_name){
 # Run function for all of my data
 emm_list <- list()
 for(i in 1:length(experiment_names)){
-  emm_list[[i]] <- get_model_contrasts(model_list[i],exp)
+  emm_list[[i]] <- get_model_contrasts(model_list[i],experiment_names[i])
 }
 ```
 
