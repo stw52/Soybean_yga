@@ -248,11 +248,11 @@ for(i in 1:length(experiment_names)){
 
 ```
 
-```{r Creating Mixed Models}
+```{r Creating Mixed Models, dev='png'}
+
 # Models will be created outside of functions or loops to ensure good model fitting techniques
 
 # Barns
-
 barns_mod <- lmer(log(Yield_Mgha) ~ Till_NT*Year + (1|Year:block), data = barns_inputs)
 barns_glm <- glmmTMB(Yield_Mgha ~ Till_NT*Year + (1|Year:block),
                         family = gaussian(link = "log"),
@@ -267,37 +267,64 @@ summary(moss_mod)
 anova(moss_mod, ddf = "Kenward-Roger")
 check_model(moss_mod)
 
-#change to be seen in git
-```
+# OCS
+ocs_mod <- lmer(log(Yield_Mgha) ~ Till_NT + (1|block), data = ocs_inputs)
+summary(ocs_mod)
+check_model(ocs_mod)
 
- exp_mod <- if(length(unique(soy_data$Year[soy_data$ExperimentName %in% experiment_name])) > 1){
+# Coulter study 
+coulter_mod <- lmer(log(Yield_Mgha) ~ Till_NT+ (1|block), data = coulter_study_inputs)
+summary(coulter_mod)
+check_model(coulter_mod)
+as.data.frame(pairs(emmeans(coulter_mod, ~Till_NT)))
+# 
+```
+```{r}
+get_soy_model <- function(soy_data, experiment_name, check_assumptions = TRUE){
+  
+  model_input <- soy_data %>%
+    filter(ExperimentName %in% experiment_name) %>%
+    drop_na(Year) %>%
+    #mutate(Year = as.factor(Year)) %>%
+    mutate(block = Rep)
+  
+   exp_mod <- if(length(unique(soy_data$Year[soy_data$ExperimentName %in% experiment_name])) > 1){
         lmer(log(Yield_Mgha) ~ as.factor(Till_NT)*as.factor(Year) + (1|Year:block) + (1:Year), data = model_input)
   } else{
     lmer(log(Yield_Mgha) ~ as.factor(Till_NT)*Year + (1|block), data = model_input)
   }
-```{r Getting model contrasts}
-get_model_contrasts <- function(exp_model, experiment_name){
-  # Function takes input of a model and experiment name to get out the contrasts from emmeans
-  mod_emm <- emmeans(exp_mod,pairwise ~Till_NT|Year)
+   
+   if(check_assumptions){
+    par(mfrow = c(2, 2))  # Arrange diagnostic plots
+    
+    # 1. Residuals vs Fitted - Check homoscedasticity
+    plot(residuals(exp_mod) ~ fitted(exp_mod), 
+         main = "Residuals vs Fitted",
+         xlab = "Fitted Values", 
+         ylab = "Residuals")
+    abline(h = 0, col = "red")
+    
+    # 2. Normal Q-Q Plot - Check normality of residuals
+    qqnorm(residuals(exp_mod), main = "Normal Q-Q")
+    qqline(residuals(exp_mod), col = "red")
+    
+    # Check normality of random effects
+    ranef_df <- ranef(exp_mod)
+    qqnorm(unlist(ranef_df), main = "Random Effects Q-Q")
+    qqline(unlist(ranef_df), col = "red")
+  }
+   
+   mod_emm <- emmeans(exp_mod,pairwise ~Till_NT|Year)
  
   contrast_df <- as.data.frame(mod_emm$contrasts) %>%
-    select(Year, estimate, SE) %>%
+    dplyr::select(Year, estimate, SE) %>%
     mutate(ExperimentName = experiment_name) %>%
     rename(yield_gap = estimate)
   
   return(contrast_df)
 }  
 
-# Run function for all of my data
-emm_list <- list()
-for(i in 1:length(experiment_names)){
-  emm_list[[i]] <- get_model_contrasts(model_list[i],experiment_names[i])
-}
-```
-
-
-
-barns_emm <- get_soy_model(comb_soy_prcp, experiment_name = "BARNS")
+barns_emm <- get_soy_model(comb_soy_prcp, experiment_name = "BARNS", check_assumptions = T)
 moss_emm <- get_soy_model(comb_soy_prcp, experiment_name = "MOSS")
 ocs_emm <- get_soy_model(comb_soy_prcp, experiment_name = "OCS")
 coulter_emm <- get_soy_model(comb_soy_prcp, experiment_name = "Coulter Study")
@@ -318,23 +345,42 @@ hist(residuals(wi_2018_mod))
 plot(residuals(wi_2018_mod)~predict(wi_2018_mod))
 wi_2018_emm <- emmeans(wi_2018_mod, pairwise ~ Till_NT|Year)
 wi_2018_contrast <- as.data.frame(wi_2018_emm$contrasts) %>%
-    select(Year, estimate, SE) %>%
+    dplyr::select(Year, estimate, SE) %>%
     mutate(ExperimentName = "No-Till Soy Split Plot") %>%
     rename(yield_gap = estimate)
 
 
 # Combine all of the contrasts into one dataframe
-total_contrasts <- rbind(barns_emm[[1]], moss_emm[[1]], ocs_emm[[1]],
-                         mowtivation_emm[[1]], coulter_emm[[1]], sf_emm[[1]], sd_emm[[1]],
-                         wi_nt_soy_emm[[1]], wi_ccbrt_emm[[1]], wi_2018_contrast,
-                         rose2_emm[[1]], rose3_emm[[1]])
+total_contrasts <- rbind(barns_emm, moss_emm, ocs_emm,
+                         mowtivation_emm, coulter_emm, sf_emm, sd_emm,
+                         wi_nt_soy_emm, wi_ccbrt_emm, wi_2018_contrast,
+                         rose2_emm, rose3_emm)
+```
 
+```{r Getting model contrasts}
+get_model_contrasts <- function(exp_model, experiment_name){
+  # Function takes input of a model and experiment name to get out the contrasts from emmeans
+  mod_emm <- emmeans(exp_mod,pairwise ~Till_NT|Year)
+ 
+  contrast_df <- as.data.frame(mod_emm$contrasts) %>%
+    select(Year, estimate, SE) %>%
+    mutate(ExperimentName = experiment_name) %>%
+    rename(yield_gap = estimate)
+  
+  return(contrast_df)
+}  
+
+# Run function for all of my data
+emm_list <- list()
+for(i in 1:length(experiment_names)){
+  emm_list[[i]] <- get_model_contrasts(model_list[i],experiment_names[i])
+}
 ```
 
 ```{r Meta analysis work}
 # Create inpput for meta analysis
 meta_input <- left_join(total_contrasts, comb_soy_prcp) %>%
-  select(Year, State, Location, ExperimentName, SoySeedingDate.y, yield_gap, SE, plant_prcp) %>%
+  dplyr::select(Year, State, Location, ExperimentName, SoySeedingDate.y, yield_gap, SE, plant_prcp) %>%
   rename("SoySeedingDate" = SoySeedingDate.y) %>%
   mutate(site_year = paste0(State, "-", Year)) %>%
   distinct()
@@ -342,6 +388,21 @@ meta_input <- left_join(total_contrasts, comb_soy_prcp) %>%
 meta_input$SoySeedingDate[meta_input$ExperimentName == "Starter Fertilizer Study"] = as.Date("2021-06-04", format = "%Y-%m-%d")
 meta_input$plant_prcp[meta_input$ExperimentName == "Starter Fertilizer Study"] = 7.44
 
+
+meta_input %>%
+  filter(State != "PA") %>%
+  ggplot(aes(x = plant_prcp, y = exp(yield_gap))) +
+  geom_point(aes(color = State))+
+  stat_poly_eq(formula = y~x, use_label(c("R2", "eq")), size = 5)+
+  theme_pubr() +
+  scale_color_manual(values = c("black", "slateblue", "red")) +
+  geom_smooth(method = "lm",formula = y ~ x,  se = FALSE, color = "gray", 
+              linetype = "dashed")  +
+  theme(axis.title = element_text(size = 18),
+        axis.text = element_text(size = 16),
+        legend.text = element_text(size = 16),
+        legend.title = element_text(size = 16))
+  
 
 # Run the meta analysis
 metagen_analysis <- metagen(data = meta_input, TE = yield_gap, seTE = SE, studlab = site_year)
@@ -358,14 +419,14 @@ metagen_result <- data.frame(
 metagen_result_comb <- cbind(metagen_result, meta_input)
 
 # Transform the outputs to a linear scale from the log scale
-metagen_result_final_1 <- metagen_result_comb %>%
+metagen_result_final <- metagen_result_comb %>%
   mutate(yield_ratio = exp(yield_gap),
          lowerci_trans = exp(ci_lower),
          upperci_trans = exp(ci_upper)) %>%
   filter(site_year != "PA-2016" & site_year != "PA-2023" & site_year != "PA-2022")
 
 # Plot the output of the meta analysis
-ratio_yg_meta_1 <- metagen_result_final_1 %>%
+ratio_yg_meta <- metagen_result_final %>%
   ggplot(aes(x = plant_prcp, y = yield_ratio))+
   geom_point(aes(color = State), size = 2) +
   geom_errorbar(aes(ymin = lowerci_trans, ymax = upperci_trans, colour = State), width = 0.2) + # Error bars for CI
@@ -382,4 +443,42 @@ ratio_yg_meta_1 <- metagen_result_final_1 %>%
         axis.text = element_text(size = 16),
         legend.text = element_text(size = 16),
         legend.title = element_text(size = 16))
+
+
+# Actual meta analysis work; above is simply just plotting effects from each lmer model against precipiation and getting an R squared value
+
+metafor_metareg <- rma.mv(yi = effect_size, V = SE^2,
+                          data = metagen_result_final, slab = ExperimentName,
+                          random = ~ 1 |ExperimentName/site_year,
+                          test = "t", method = "REML",
+                          mods = ~ plant_prcp)
+
+summary(metafor_metareg)
+metafor_metareg
+
+predicted_metafor <- data.frame(predict(metafor_metareg))
+
+predict.rma(metafor_metareg)
+
+random_rain <- rnorm(nrow(metafor_metareg$data), mean = mean(metagen_result_final$plant_prcp), 
+                                        sd= sd(metagen_result_final$plant_prcp))
+
+predicted_metafor_ratios <- predicted_metafor %>%
+  mutate(yield_ratio = exp(pred),
+         ci_lower_trans = exp(ci.lb),
+         ci_upper_trans = exp(ci.ub)) 
+predicted_metafor_ratios <- cbind(predicted_metafor_ratios, 
+                                  random_rain)
+
+ggplot(predicted_metafor_ratios, aes(x = random_rain, y = yield_ratio))+
+  geom_line() +
+  geom_point() +
+  geom_ribbon(aes(ymin = ci_lower_trans, ymax = ci_upper_trans, alpha = 0.5), show.legend = F) +
+  theme_bw() +
+  labs(y = "Yield ratio between no-till to till yield",
+       x = "Precipitation accumulation +/- 15 days of planting (cm)",
+       alpha = "") +
+  stat_poly_eq(use_label(c("Eq","R2"))) +
+  geom_smooth(method = "lm", se = FALSE, color = "black", linetype = "dashed", alpha = 0.85)
+
 ```
