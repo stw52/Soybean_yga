@@ -152,7 +152,12 @@ precip_freq <- combined_results %>%
   facet_wrap(~site) + 
   theme_bw() +
   theme(legend.position = "top") +
-  labs(y = "1-Day precipitation event (cm)",x = "Return period (Years)", color = "" )
+  scale_color_manual(values = c("#1E88E5", "#FFC107")) +
+  labs(y = "1-Day precipitation event (cm)",x = "Return period (Years)", color = "" ) +
+  theme(axis.title = element_text(size = 18),
+        axis.text = element_text(size = 16),
+        legend.text = element_text(size = 16),
+        legend.title = element_text(size = 16))
 ggsave(precip_freq, filename = here("Figures/prcp_freq_sites.pdf"),dpi = 300, useDingbats=F)
 ```
 
