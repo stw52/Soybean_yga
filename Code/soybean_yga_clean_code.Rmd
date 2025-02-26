@@ -158,7 +158,7 @@ precip_freq <- combined_results %>%
         axis.text = element_text(size = 16),
         legend.text = element_text(size = 16),
         legend.title = element_text(size = 16))
-ggsave(precip_freq, filename = here("Figures/prcp_freq_sites.pdf"),dpi = 300, useDingbats=F)
+ggsave(precip_freq, filename = here("Figures/prcp_freq_sites.png"),dpi = 300, width = 9, height = 6, units = "in")
 ```
 
 
@@ -190,7 +190,7 @@ nt_t_counts <- soy_rye_useful %>%
   distinct(ExperimentName, till_count, nt_count)
 ```
 
-```{r Functions to get meta analysis independent variables}
+```{r Function to get planting precipitation before and after}
 #### These functions are for getting independent variables for later use in meta analysis, such as precip before and after planting, GDD, etc. These are variables that are climatically based and vary by site year
 planting_precip <- function(met_df, mgmt_df, station_site){
 
@@ -201,7 +201,7 @@ planting_precip <- function(met_df, mgmt_df, station_site){
 # Find planting dates for the location for each experiment and year
   planting_dates <- mgmt_df %>%
     group_by(Year, Location) %>%
-    slice_min(SoySeedingDate) %>%
+    slice_min(SoySeedingDate)%>%
     ungroup() %>%
     filter(Location == station_site) %>%
     dplyr::select(ExperimentName, Year, State, Location, SoySeedingDate) %>%
@@ -229,8 +229,39 @@ all_plant_prcp <- rbind(musgrave_plant_prcp, wi_plant_prcp, geneva_plant_prcp, p
 comb_soy_prcp <- left_join(soy_rye_useful, all_plant_prcp, by = c("Year", "State", "Location", "ExperimentName"))
 ```
 
-```{r Function to get each experiments yield data set up for meta analysis}
+```{r Function to get rye biomass}
+#### These functions are for getting independent variables for later use in meta analysis, such as precip before and after planting, GDD, etc. These are variables that are climatically based and vary by site year
+rye_biomass <- function(mgmt_df, station_site){
+  # mgmt_df: Dataframe that includes soybean management and agronomic information, including planting date
 
+#### Finds rye biomass associated with a block for comparison of yields by tillage in differing levels of rye biomass
+  rye_bm <- mgmt_df %>%
+    group_by(ExperimentName, Year, State, Location, Rep) %>%
+    mutate(rye_bm = ifelse(is.na(RyeBiomass_kgha), 
+                           RyeBiomass_kgha[Till_NT == "NT"], 
+                           RyeBiomass_kgha)) %>%
+    summarise(rye_bm = mean(rye_bm, na.rm = TRUE)) %>%
+    ungroup()
+
+  return(rye_bm)
+}
+
+all_rye<- rye_biomass(soy_rye_useful)
+
+mus_wi_rye <- all_rye %>%
+  filter(Location %in% c("Musgrave", "AARS")) %>%
+  drop_na()
+
+exps_w_rye <- mus_wi_rye$ExperimentName
+
+soy_ylds <- soy_rye_useful %>%
+  dplyr::select(ExperimentName, Year, State, Location, Rep, Till_NT, Yield_Mgha) %>%
+  filter(ExperimentName %in% exps_w_rye)
+
+comb_rye_prcp <- left_join(mus_wi_rye, soy_ylds,by = c("Year", "State", "ExperimentName", "Rep"))
+```
+
+```{r Function to get each experiments yield data set up for meta analysis}
 get_model_inputs <- function(soy_data, experiment_name){
   # This function gets the data for each individual experiment to be used for creating each model
   model_input <- soy_data %>%
@@ -251,50 +282,95 @@ for(i in 1:length(experiment_names)){
   assign(df_name, input_list[[i]])
 }
 
+# Data need to be further filtered by each experiment to only extract the "control" NT treatments and the tilled comparison. Experiments needing this are: Starter fert, seeding depth, coulter study, ccbrt, wisc. 2018, mowtivation, wi-2015.
+
+sf_filter_inputs <- starter_fertilizer_study_inputs %>%
+  filter(ExperimentalTrt == "Tilled" | ExperimentalTrt == "Control")
+  
+sd_filter_inputs <- seeding_depth_study_inputs %>%
+  filter(ExperimentalTrt == "Tilled" | ExperimentalTrt == "1.75") # Need to figure out what seeding depth was used in tillage
+
+#coulter_filter <- coulter_study_inputs %>%
+ # filter(ExperimentalTrt == "Tilled no coulter" | ExperimentalTrt == "Straight coulter") # Talk to chris or ben about what coulter type to include
+  
+wi_2020 <- ccbrt_soybean_inputs %>%
+  filter(Year == 2020 & (ExperimentalTrt == "Control" | endsWith(ccbrt_soybean_inputs$ExperimentalTrt,"r"))) # filter to only include the planter data, not drilled
+
+wi_2019 <- ccbrt_soybean_inputs %>%
+  filter(Year == 2019)
+
+mowtivation_filter <- mowtivation_inputs %>%
+  filter(ExperimentalTrt == "TIC" | ExperimentalTrt == "RNO")
+  
+wi_2015_filter <- no_till_soybeans_inputs %>%
+  filter(startsWith(ExperimentalTrt, "Tilled") | startsWith(ExperimentalTrt, "0 "))
+
+wi_2017_filter <- no_till_soybeans_inputs %>%
+  filter(Year == 2017)
+
+wi_2018 <- comb_soy_prcp %>%
+  filter(ExperimentName == "No-Till Soy Split Plot") %>%
+  separate_wider_delim(ExperimentalTrt, delim = " ", names = c("main_plot","split_plot")) %>%
+  group_by(Rep,main_plot) %>%
+  mutate(Yield_Mgha_2 = mean(Yield_Mgha))
+
+wi_2018_mod <- lmer(log(Yield_Mgha) ~ main_plot*split_plot + (1|Rep:main_plot) + (1:Rep),
+                    data = wi_2018)
+
+wi_2018_filter <- comb_soy_prcp %>%
+  filter(ExperimentName == "No-Till Soy Split Plot") %>%
+  mutate(block = Rep)
+summary(wi_2018_mod)
+check_model(wi_2018_mod)
+emmeans(wi_2018_mod, pairwise ~ split_plot|main_plot, type = "response")
+
+
+combined_filtered_results <- rbind(barns_inputs, moss_inputs, sf_filter_inputs, sd_filter_inputs,
+                                   coulter_study_inputs, wi_2020, wi_2019, mowtivation_filter,
+                                   wi_2015_filter, wi_2017_filter, ocs_inputs, wi_2018_filter)
+combined_filtered_results <- combined_filtered_results %>%
+  mutate(Year = as.numeric(as.character(Year)),
+         site_year = paste0(Location,"-",Year)) 
 ```
 
-```{r Creating Mixed Models, dev='png'}
+```{r Looking at stand count}
+filter_w_stand <- combined_filtered_results %>%
+  group_by(Year, ExperimentName) %>%
+  drop_na(Per_Emergence) %>%
+  filter(n_distinct(Till_NT) > 1)
 
-# Models will be created outside of functions or loops to ensure good model fitting techniques
+stand_model <- lmer(Per_Emergence ~  Till_NT*as.factor(Year) + (1|ExperimentName:Year:Rep) + (1|ExperimentName:Year), data = filter_w_stand)
+summary(stand_model)
 
-# Barns
-barns_mod <- lmer(log(Yield_Mgha) ~ Till_NT*Year + (1|Year:block), data = barns_inputs)
-barns_glm <- glmmTMB(Yield_Mgha ~ Till_NT*Year + (1|Year:block),
-                        family = gaussian(link = "log"),
-                        data = barns_inputs)
-summary(barns_glm)
-simulateResiduals(barns_glm, plot = TRUE)
-check_model(barns_glm)
+stand_emm <- emmeans(stand_model,pairwise ~Till_NT|(Year))
+stand_contrast <- as.data.frame(stand_emm$contrasts)
 
-# MOSS 
-moss_mod <- lmer(log(Yield_Mgha) ~ Till_NT*Year + (1|Year:block), data = moss_inputs)
-summary(moss_mod)
-anova(moss_mod, ddf = "Kenward-Roger")
-check_model(moss_mod)
+stand_prcp <- left_join(stand_contrast, all_plant_prcp)
 
-# OCS
-ocs_mod <- lmer(log(Yield_Mgha) ~ Till_NT + (1|block), data = ocs_inputs)
-summary(ocs_mod)
-check_model(ocs_mod)
+stand_prcp <- stand_prcp %>%
+  filter(State != "PA" & ExperimentName !="MOSS" & ExperimentName != "White Mold") %>%
+  mutate(site_year = paste0(State,"-",Year))
 
-# Coulter study 
-coulter_mod <- lmer(log(Yield_Mgha) ~ Till_NT+ (1|block), data = coulter_study_inputs)
-summary(coulter_mod)
-check_model(coulter_mod)
-as.data.frame(pairs(emmeans(coulter_mod, ~Till_NT)))
-# 
+stand_prcp %>%
+  ggplot(aes(x = plant_prcp, y = estimate, colour = site_year)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = estimate-SE, ymax = estimate+SE), width = 0.2) +
+  theme_bw() +
+  geom_smooth(method = "lm",formula = y ~ x,  se = FALSE, color = "gray", 
+              linetype = "dashed") +
+  stat_poly_eq(formula = y~x, use_label(c("R2", "eq")), size = 5) +
+  labs(x = "Planting precipitation (cm)", y = "Percent emergence (%)")
 ```
+
 ```{r}
 get_soy_model <- function(soy_data, experiment_name, check_assumptions = TRUE){
   
   model_input <- soy_data %>%
     filter(ExperimentName %in% experiment_name) %>%
-    drop_na(Year) %>%
-    #mutate(Year = as.factor(Year)) %>%
-    mutate(block = Rep)
+    drop_na(Year)
   
    exp_mod <- if(length(unique(soy_data$Year[soy_data$ExperimentName %in% experiment_name])) > 1){
-        lmer(log(Yield_Mgha) ~ as.factor(Till_NT)*as.factor(Year) + (1|Year:block) + (1:Year), data = model_input)
+        lmer(log(Yield_Mgha) ~ as.factor(Till_NT)*as.factor(Year) + (1|Year:block), data = model_input)
   } else{
     lmer(log(Yield_Mgha) ~ as.factor(Till_NT)*Year + (1|block), data = model_input)
   }
@@ -319,7 +395,7 @@ get_soy_model <- function(soy_data, experiment_name, check_assumptions = TRUE){
     qqline(unlist(ranef_df), col = "red")
   }
    
-   mod_emm <- emmeans(exp_mod,pairwise ~Till_NT|Year)
+   mod_emm <- emmeans(exp_mod,pairwise ~Till_NT|as.factor(Year))
  
   contrast_df <- as.data.frame(mod_emm$contrasts) %>%
     dplyr::select(Year, estimate, SE) %>%
@@ -329,17 +405,35 @@ get_soy_model <- function(soy_data, experiment_name, check_assumptions = TRUE){
   return(contrast_df)
 }  
 
-barns_emm <- get_soy_model(comb_soy_prcp, experiment_name = "BARNS", check_assumptions = T)
-moss_emm <- get_soy_model(comb_soy_prcp, experiment_name = "MOSS")
-ocs_emm <- get_soy_model(comb_soy_prcp, experiment_name = "OCS")
-coulter_emm <- get_soy_model(comb_soy_prcp, experiment_name = "Coulter Study")
-sf_emm <- get_soy_model(comb_soy_prcp, experiment_name = "Starter Fertilizer Study")
-sd_emm <- get_soy_model(comb_soy_prcp, experiment_name = "Seeding Depth Study")
-mowtivation_emm <- get_soy_model(comb_soy_prcp, experiment_name = "Mowtivation")
-wi_nt_soy_emm <- get_soy_model(comb_soy_prcp, experiment_name = "No-Till Soybeans")
-wi_ccbrt_emm <- get_soy_model(comb_soy_prcp, experiment_name = "CCBRT Soybean")
-rose2_emm <- get_soy_model(comb_soy_prcp, experiment_name = "ROSE2")
-rose3_emm <- get_soy_model(comb_soy_prcp, experiment_name = "ROSE3")
+library(nlme)
+# Homogeneous variance model
+model_hom <- lme(Yield_Mgha ~ Till_NT, random = ~ 1 | block, data = ocs_inputs)
+
+# Heterogeneous variance model
+model_het <- lme(Yield_Mgha ~ Till_NT,
+                 random = ~ 1 | block,
+                 weights = varIdent(form = ~ 1 | Till_NT),
+                 data = ocs_inputs)
+
+# Likelihood ratio test
+anova(model_hom, model_het)
+plot(resid(model_het)~predict(model_het))
+
+emmeans(model_het, ~Till_NT)
+
+
+barns_emm <- get_soy_model(combined_filtered_results, experiment_name = "BARNS", check_assumptions = T)
+moss_emm <- get_soy_model(combined_filtered_results, experiment_name = "MOSS")
+ocs_emm <- get_soy_model(combined_filtered_results, experiment_name = "OCS")
+coulter_emm <- get_soy_model(combined_filtered_results, experiment_name = "Coulter Study")
+sf_emm <- get_soy_model(combined_filtered_results, experiment_name = "Starter Fertilizer Study")
+sd_emm <- get_soy_model(combined_filtered_results, experiment_name = "Seeding Depth Study")
+mowtivation_emm <- get_soy_model(combined_filtered_results, experiment_name = "Mowtivation")
+wi_nt_soy_emm <- get_soy_model(combined_filtered_results, experiment_name = "No-Till Soybeans")
+wi_ccbrt_emm <- get_soy_model(combined_filtered_results, experiment_name = "CCBRT Soybean")
+wi_2018_emm <- get_soy_model(combined_filtered_results, experiment_name = "No-Till Soy Split Plot")
+#rose2_emm <- get_soy_model(comb_soy_prcp, experiment_name = "ROSE2")
+#rose3_emm <- get_soy_model(comb_soy_prcp, experiment_name = "ROSE3")
 
 # Separate model for WI 2018 split plot setup
 wi_2018 <- comb_soy_prcp %>%
@@ -358,33 +452,17 @@ wi_2018_contrast <- as.data.frame(wi_2018_emm$contrasts) %>%
 # Combine all of the contrasts into one dataframe
 total_contrasts <- rbind(barns_emm, moss_emm, ocs_emm,
                          mowtivation_emm, coulter_emm, sf_emm, sd_emm,
-                         wi_nt_soy_emm, wi_ccbrt_emm, wi_2018_contrast,
-                         rose2_emm, rose3_emm)
+                         wi_nt_soy_emm, wi_ccbrt_emm, wi_2018_emm)#,
+                        # rose2_emm, rose3_emm)
 ```
 
-```{r Getting model contrasts}
-get_model_contrasts <- function(exp_model, experiment_name){
-  # Function takes input of a model and experiment name to get out the contrasts from emmeans
-  mod_emm <- emmeans(exp_mod,pairwise ~Till_NT|Year)
- 
-  contrast_df <- as.data.frame(mod_emm$contrasts) %>%
-    select(Year, estimate, SE) %>%
-    mutate(ExperimentName = experiment_name) %>%
-    rename(yield_gap = estimate)
-  
-  return(contrast_df)
-}  
 
-# Run function for all of my data
-emm_list <- list()
-for(i in 1:length(experiment_names)){
-  emm_list[[i]] <- get_model_contrasts(model_list[i],experiment_names[i])
-}
-```
 
 ```{r Meta analysis work}
 # Create inpput for meta analysis
-meta_input <- left_join(total_contrasts, comb_soy_prcp) %>%
+meta_input <- combined_filtered_results %>%
+  #mutate(Year = (Year)) %>%
+  left_join(total_contrasts) %>%
   dplyr::select(Year, State, Location, ExperimentName, SoySeedingDate.y, yield_gap, SE, plant_prcp) %>%
   rename("SoySeedingDate" = SoySeedingDate.y) %>%
   mutate(site_year = paste0(State, "-", Year)) %>%
@@ -427,27 +505,29 @@ metagen_result_comb <- cbind(metagen_result, meta_input)
 metagen_result_final <- metagen_result_comb %>%
   mutate(yield_ratio = exp(yield_gap),
          lowerci_trans = exp(ci_lower),
-         upperci_trans = exp(ci_upper)) %>%
-  filter(site_year != "PA-2016" & site_year != "PA-2023" & site_year != "PA-2022")
+         upperci_trans = exp(ci_upper)) #%>%
+  #filter(site_year != "PA-2016" & site_year != "PA-2023" & site_year != "PA-2022")
 
 # Plot the output of the meta analysis
 ratio_yg_meta <- metagen_result_final %>%
   ggplot(aes(x = plant_prcp, y = yield_ratio))+
   geom_point(aes(color = State), size = 2) +
   geom_errorbar(aes(ymin = lowerci_trans, ymax = upperci_trans, colour = State), width = 0.2) + # Error bars for CI
-  #geom_text(aes(label  = site_year)) +
+  geom_text(aes(label  = site_year)) +
   labs(x = "Precipitation accumulation +/- 15 days of planting (cm)",
        y = "Ratio of no-till yield to tilled yield",
        color = "") +
   stat_poly_eq(formula = y~x, use_label(c("R2", "eq")), size = 5)+
   theme_pubr() +
-  scale_color_manual(values = c("black", "slateblue", "red")) +
+  scale_color_manual(values = c("black", "red")) +
   geom_smooth(method = "lm",formula = y ~ x,  se = FALSE, color = "gray", 
               linetype = "dashed")  +
   theme(axis.title = element_text(size = 18),
         axis.text = element_text(size = 16),
         legend.text = element_text(size = 16),
         legend.title = element_text(size = 16))
+ggsave(ratio_yg_meta, filename = "Figures/ratio_yg_metaplot.png",dpi = 300,
+       width = 9, height = 6, units = "in")
 
 
 # Actual meta analysis work; above is simply just plotting effects from each lmer model against precipiation and getting an R squared value
@@ -474,16 +554,5 @@ predicted_metafor_ratios <- predicted_metafor %>%
          ci_upper_trans = exp(ci.ub)) 
 predicted_metafor_ratios <- cbind(predicted_metafor_ratios, 
                                   random_rain)
-
-ggplot(predicted_metafor_ratios, aes(x = random_rain, y = yield_ratio))+
-  geom_line() +
-  geom_point() +
-  geom_ribbon(aes(ymin = ci_lower_trans, ymax = ci_upper_trans, alpha = 0.5), show.legend = F) +
-  theme_bw() +
-  labs(y = "Yield ratio between no-till to till yield",
-       x = "Precipitation accumulation +/- 15 days of planting (cm)",
-       alpha = "") +
-  stat_poly_eq(use_label(c("Eq","R2"))) +
-  geom_smooth(method = "lm", se = FALSE, color = "black", linetype = "dashed", alpha = 0.85)
 
 ```
