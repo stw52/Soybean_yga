@@ -250,7 +250,10 @@ all_rye<- rye_biomass(soy_rye_useful)
 
 mus_wi_rye <- all_rye %>%
   filter(Location %in% c("Musgrave", "AARS")) %>%
-  drop_na()
+  drop_na() %>%
+  group_by(Location, ExperimentName, Year) %>%
+  summarise(rye_mean = mean(rye_bm)) %>%
+  ungroup()
 
 exps_w_rye <- mus_wi_rye$ExperimentName
 
@@ -333,6 +336,110 @@ combined_filtered_results <- combined_filtered_results %>%
          site_year = paste0(Location,"-",Year)) 
 ```
 
+```{r T test of yields}
+t_test_soy_yield <- combined_filtered_results %>%
+  group_by(Year, Location) %>%
+  summarize(t_test = list(t.test(Yield_Mgha ~ Till_NT))) %>%
+  mutate(
+    t_statistic = sapply(t_test, function(x) x$statistic),
+    p_value = sapply(t_test, function(x) x$p.value),
+    mean_tillage_1 = sapply(t_test, function(x) x$estimate[1]),
+    mean_tillage_2 = sapply(t_test, function(x) x$estimate[2])
+  )
+
+
+soy_prcp_w_pvals <- left_join(combined_filtered_results, t_test_soy_yield)
+
+soy_prcp_w_pvals <- soy_prcp_w_pvals %>%
+  mutate(label = case_when(
+      p_value < 0.05 & Till_NT == "Till"~ "*",
+      p_value > 0.05 & Till_NT == "Till"~ "" ,
+      !is.na(p_value) & Till_NT == "Till" ~ "*" 
+    )
+  ) %>%
+  group_by(Year, Location, ExperimentName, Till_NT) %>%
+  mutate(mean_yield = mean(Yield_Mgha)) %>%
+  mutate(se_yield = sd(Yield_Mgha)/sqrt(n())) %>%
+  ungroup() %>%
+  distinct(Year, Location, ExperimentName, mean_yield, se_yield, p_value, label, Till_NT, site_year)
+
+soy_prcp_w_pvals$Year[soy_prcp_w_pvals$Year == 2021 & soy_prcp_w_pvals$ExperimentName == "Seeding Depth Study"] <- "2021a" 
+soy_prcp_w_pvals$Year[soy_prcp_w_pvals$Year == 2021 & soy_prcp_w_pvals$ExperimentName == "Starter Fertilizer Study"] <- "2021b" 
+
+
+
+location_labels <- c("AARS" = "Arlington, WI", "Musgrave" = "Aurora, NY")
+
+soy_pval_graph <- soy_prcp_w_pvals %>%
+  ggplot(aes(x = Year, y = mean_yield*14.87, fill = Till_NT)) +
+  geom_col(width = 0.6,  position = position_dodge(width = 0.6)) +
+  geom_errorbar(aes(ymin = mean_yield*14.87-se_yield*14.87, ymax = mean_yield*14.87+se_yield*14.87), width = 0.2, position = position_dodge(width = 0.6)) +
+  geom_text(aes(label = label, colour = "black", y = mean_yield*14.87+se_yield*14.87), size = 12, show.legend = FALSE, color = "black") +
+  facet_wrap(~Location, nrow = 3, scales = "free_x", labeller = as_labeller(location_labels)) +
+  scale_fill_manual(values = c("#3B528BFF", "#FDE779"), 
+                    labels = c("NT" = "No-till", "Till" = "Till")) +
+  theme_bw() +
+  labs(y = expression(paste("Mean yield, " , "(Bu ", " ", ac^{-1}, ")")),
+       fill = "", 
+       x = 'Year') +
+  theme(axis.title = element_text(size = 20),
+        axis.text = element_text(size = 20),
+        axis.text.x = element_text(angle = 45, vjust = 0.7),
+        strip.text = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 16)) +
+  ylim(c(0,78))
+
+ggsave(soy_pval_graph, filename = here("Figures/yield_by_tillage_pvals_TOTO.png"), dpi = 300, 
+       width = 8, height = 5, units = "in")
+```
+
+
+```{r Seeing if Lmer on all data works}
+
+combined_mixmod <- lmer(log(Yield_Mgha) ~ Till_NT*site_year + (1|Location:Year:block),
+                        data = combined_filtered_results)
+summary(combined_mixmod)
+check_model(combined_mixmod)
+
+comb_emm <- emmeans(combined_mixmod, pairwise~Till_NT|site_year, type = "response")
+
+comb_contrasts <- as.data.frame(comb_emm$contrasts)
+
+contrast_plus_data <- combined_filtered_results %>%
+  left_join(comb_contrasts) %>%
+  dplyr::select(Year, State, Location, ExperimentName, SoySeedingDate.y, ratio, SE, plant_prcp, site_year, Per_Emergence) %>%
+  rename("SoySeedingDate" = SoySeedingDate.y,
+         "yield_gap" = ratio) %>%
+  distinct()
+
+contrast_plus_data$SoySeedingDate[contrast_plus_data$ExperimentName == "Starter Fertilizer Study"] <- as.Date("2021-06-04", format = "%Y-%m-%d")
+contrast_plus_data$plant_prcp[contrast_plus_data$ExperimentName == "Starter Fertilizer Study"] = 7.44
+
+
+
+# Plot the output of the meta analysis
+contrast_plus_data %>%
+  ggplot(aes(x = plant_prcp, y = yield_gap))+
+  geom_point(aes(color = State), size = 2) +
+  geom_errorbar(aes(ymin = ci(yield_gap, SE)$lower, ymax = ci(yield_gap,SE)$upper, colour = State), width = 0.2) + # Error bars for CI
+  #geom_text(aes(label  = site_year)) +
+  labs(x = "Precipitation accumulation +/- 15 days of planting (cm)",
+       y = "Ratio of no-till yield to tilled yield",
+       color = "") +
+  stat_poly_eq(formula = y~x, use_label(c("R2", "eq")), size = 5)+
+  theme_pubr() +
+  scale_color_manual(values = c("black", "red")) +
+  geom_smooth(method = "lm",formula = y ~ x,  se = FALSE, color = "gray", 
+              linetype = "dashed")  +
+  theme(axis.title = element_text(size = 18),
+        axis.text = element_text(size = 16),
+        legend.text = element_text(size = 16),
+        legend.title = element_text(size = 16))
+## Method seems to introduce a lot of standard error, but this could be due to how I am modeling
+
+```
+
 ```{r Looking at stand count}
 filter_w_stand <- combined_filtered_results %>%
   group_by(Year, ExperimentName) %>%
@@ -360,9 +467,40 @@ stand_prcp %>%
               linetype = "dashed") +
   stat_poly_eq(formula = y~x, use_label(c("R2", "eq")), size = 5) +
   labs(x = "Planting precipitation (cm)", y = "Percent emergence (%)")
+
+
+library(lavaan)
+
+# Specify the SEM model
+model <- '
+  Yield_Mgha ~ plant_prcp
+  Per_Emergence ~ plant_prcp
+  Per_Emergence ~ Till_NT
+  Yield_Mgha ~ Till_NT
+'
+
+
+filter_w_stand$Till_NT <- as.factor(filter_w_stand$Till_NT)
+# Fit the SEM model
+fit <- sem(model, data = filter_w_stand)
+
+# Model summary
+summary(fit, standardized = TRUE, fit.measures = TRUE)
+
+library(semPlot)
+
+# Plot the SEM model
+semPaths(fit, 
+         what = "std",       # Standardized coefficients
+         edge.label.cex = 1.2, 
+         layout = "spring",  # Layout options: "circle", "tree", "spring"
+         sizeMan = 8,        # Size of manifest variables
+         sizeLat = 10,       # Size of latent variables (if any)
+         edge.color = "black")
+
 ```
 
-```{r}
+```{r Model the data}
 get_soy_model <- function(soy_data, experiment_name, check_assumptions = TRUE){
   
   model_input <- soy_data %>%
@@ -404,7 +542,7 @@ get_soy_model <- function(soy_data, experiment_name, check_assumptions = TRUE){
   
   return(contrast_df)
 }  
-
+# Look at tweedie GLMM --> naturally allows variance to be non-consistent
 library(nlme)
 # Homogeneous variance model
 model_hom <- lme(Yield_Mgha ~ Till_NT, random = ~ 1 | block, data = ocs_inputs)
@@ -434,19 +572,6 @@ wi_ccbrt_emm <- get_soy_model(combined_filtered_results, experiment_name = "CCBR
 wi_2018_emm <- get_soy_model(combined_filtered_results, experiment_name = "No-Till Soy Split Plot")
 #rose2_emm <- get_soy_model(comb_soy_prcp, experiment_name = "ROSE2")
 #rose3_emm <- get_soy_model(comb_soy_prcp, experiment_name = "ROSE3")
-
-# Separate model for WI 2018 split plot setup
-wi_2018 <- comb_soy_prcp %>%
-  filter(ExperimentName == "No-Till Soy Split Plot") %>%
-  separate_wider_delim(ExperimentalTrt, delim = " ", names = c("main_plot","split_plot"))
-wi_2018_mod <- lmer(log(Yield_Mgha) ~ as.factor(Till_NT)*Year + (1|Rep:main_plot) + (1:Rep), data = wi_2018)
-hist(residuals(wi_2018_mod))
-plot(residuals(wi_2018_mod)~predict(wi_2018_mod))
-wi_2018_emm <- emmeans(wi_2018_mod, pairwise ~ Till_NT|Year)
-wi_2018_contrast <- as.data.frame(wi_2018_emm$contrasts) %>%
-    dplyr::select(Year, estimate, SE) %>%
-    mutate(ExperimentName = "No-Till Soy Split Plot") %>%
-    rename(yield_gap = estimate)
 
 
 # Combine all of the contrasts into one dataframe
@@ -537,9 +662,17 @@ metafor_metareg <- rma.mv(yi = effect_size, V = SE^2,
                           random = ~ 1 |ExperimentName/site_year,
                           test = "t", method = "REML",
                           mods = ~ plant_prcp)
+metafor_metareg
 
 summary(metafor_metareg)
 metafor_metareg
+
+rma_prcp <- rma(yi = effect_size, sei = SE,
+                data = metagen_result_final, slab = ExperimentName,
+                method = "REML", test = "t",
+                ri = ~ 1 |ExperimentName/site_year,
+                mods = ~plant_prcp)
+rma_prcp
 
 predicted_metafor <- data.frame(predict(metafor_metareg))
 
@@ -552,7 +685,58 @@ predicted_metafor_ratios <- predicted_metafor %>%
   mutate(yield_ratio = exp(pred),
          ci_lower_trans = exp(ci.lb),
          ci_upper_trans = exp(ci.ub)) 
+
 predicted_metafor_ratios <- cbind(predicted_metafor_ratios, 
                                   random_rain)
+
+new_data <- data.frame(plant_prcp = seq(min(metagen_result_final$plant_prcp), 
+                                        max(metagen_result_final$plant_prcp), 
+                                        length.out = 100))
+
+# Predict yield gap ratio using the rma.mv model
+pred <- predict(metafor_metareg, newmods = new_data$plant_prcp)
+
+null_model <- rma.mv(yi = effect_size, V = SE^2, 
+                     random = ~ 1 | ExperimentName/site_year,
+                     data = metagen_result_final, method = "REML")
+
+# Extract sigma2 values from both models
+sigma2_metareg <- sum(metafor_metareg$sigma2)  
+sigma2_null <- sum(null_model$sigma2)           
+
+# Calculate pseudo-R^2
+pseudo_r2 <- 1 - (sigma2_metareg / sigma2_null)
+pseudo_r2 <- round(pseudo_r2, 3)
+
+p_value <- metafor_metareg$pval[2]
+
+new_data$pred <- exp(pred$pred)
+new_data$ci.lb <- exp(pred$ci.lb)
+new_data$ci.ub <- exp(pred$ci.ub)
+
+# Plot the predictions with confidence intervals
+metaplot <- ggplot(new_data, aes(x = plant_prcp, y = pred)) +
+  geom_line(color = "black", linewidth = 1, alpha = 0.8) +
+  geom_ribbon(aes(ymin = ci.lb, ymax = ci.ub), alpha = 0.4, fill = "gray") +
+  geom_point(data = metagen_result_final, 
+             aes(x = plant_prcp, y = yield_ratio, colour = State), 
+             alpha = 0.95, size = 2) +
+  geom_errorbar(data = metagen_result_final,
+                aes(x = plant_prcp, y = yield_ratio,
+                    ymin = lowerci_trans, ymax = upperci_trans), width = 0.2) +
+  annotate("text", x = 5, y=1.2, label = paste("R² =", pseudo_r2, "; p =", round(p_value,3)), size = 4) +
+  # Labels and theme
+  labs(x = "Precipitation +/- 15 days of planting (cm)", 
+       y = "Yield gap ratio") +
+  theme_bw() +
+  scale_color_manual(values = c("black", "red")) +
+  theme(axis.text = element_text(size = 14),
+        axis.title = element_text(size = 14),
+        legend.text = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        plot.caption = element_text(size = 14),
+        plot.caption.position = "plot")
+ggsave(metaplot, filename = "Figures/metaplot_w_points.png", dpi = 300)
+
 
 ```
