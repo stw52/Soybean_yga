@@ -21,6 +21,7 @@ library(lmerTest)
 library(glmmTMB)
 library(DHARMa)
 library(shades)
+library(MuMIn)
 library(meta)
 library(metafor)
 library(here)
@@ -31,7 +32,6 @@ library(fitdistrplus)
 
 options(contrasts = c("contr.sum", "contr.poly")) #setting contrasts
 ```
-
 
 ```{r Read in PRISM weather data}
 #### PRISM weather data was extracted from python based API provided by Ben Eck from NRCC. The files here are raw data from there and are cleaned in this chunk.
@@ -274,13 +274,15 @@ soy_rye_useful <- soy_rye_raw %>%
                                     Field == "RN20" ~ "White Mold",
                                     .default = ExperimentName)) %>%
   dplyr::select(Year, State, Location, ExperimentName, Rep, SoySeedingDate, Till_NT,
-         RyeBiomass_kgha, SoyStand_ha, Per_Emergence, WeedBiomass_kgha, Yield_Mgha, Yield_buac, ExperimentalTrt) %>%
+         RyeBiomass_kgha, SoyStand_ha, Per_Emergence, WeedBiomass_kgha, Yield_Mgha, Yield_buac, ExperimentalTrt, SoySeedingRate_ha) %>%
   filter(ExperimentName != "CIG NT Soybeans") %>%
   mutate(SoySeedingDate = as.Date(SoySeedingDate, format = "%m/%d/%y")) %>%
   filter(SoySeedingDate != "2019-10-06") %>%
   mutate(ExperimentName = case_when(SoySeedingDate == "2018-06-06"~ "No-Till Soy Split Plot",
                                     .default = ExperimentName),
-         Location = case_when(State == "PA" ~ "Rock Springs", .default = Location))
+         Location = case_when(State == "PA" ~ "Rock Springs", .default = Location)) %>%
+  filter(State != "PA",
+         Location != "Geneva")
 
 
 # Count number of no-till and tilled plots for each experiment and year of the experiment
@@ -540,62 +542,163 @@ contrast_plus_data %>%
 ```
 
 ```{r Looking at stand count}
+# Soybean density of NT treatments
 filter_w_stand <- combined_filtered_results %>%
+  filter(Till_NT == "NT") %>%
   group_by(Year, ExperimentName) %>%
-  drop_na(Per_Emergence) %>%
-  filter(n_distinct(Till_NT) > 1)
+  drop_na(SoyStand_ha) 
 
-stand_model <- lmer(Per_Emergence ~  Till_NT*as.factor(Year) + (1|ExperimentName:Year:Rep) + (1|ExperimentName:Year), data = filter_w_stand)
+stand_w_prcp <- filter_w_stand %>%
+  left_join(all_plant_prcp)
+
+stand_model <- lmer(Yield_Mgha ~  Per_Emergence*plant_prcp + (1|ExperimentName:Year:Rep) + (1|ExperimentName:Year), 
+                    data =stand_w_prcp)
+
 summary(stand_model)
+performance::r2(stand_model)
 
-stand_emm <- emmeans(stand_model,pairwise ~Till_NT|(Year))
-stand_contrast <- as.data.frame(stand_emm$contrasts)
+boxplot(filter_w_stand$Yield_Mgha)
 
-stand_prcp <- left_join(stand_contrast, all_plant_prcp)
 
-stand_prcp <- stand_prcp %>%
-  filter(State != "PA" & ExperimentName !="MOSS" & ExperimentName != "White Mold") %>%
-  mutate(site_year = paste0(State,"-",Year))
-
-stand_prcp %>%
-  ggplot(aes(x = plant_prcp, y = estimate, colour = site_year)) +
+filter_w_stand %>%
+  #filter(as.numeric(SoySeedingRate_ha) <= 617500) %>%
+  ggplot(aes(x = Per_Emergence, y = Yield_Mgha)) +
   geom_point() +
-  geom_errorbar(aes(ymin = estimate-SE, ymax = estimate+SE), width = 0.2) +
-  theme_bw() +
-  geom_smooth(method = "lm",formula = y ~ x,  se = FALSE, color = "gray", 
-              linetype = "dashed") +
-  stat_poly_eq(formula = y~x, use_label(c("R2", "eq")), size = 5) +
-  labs(x = "Planting precipitation (cm)", y = "Percent emergence (%)")
+  facet_wrap(~SoySeedingRate_ha) +
+  theme_pubr() +
+  stat_poly_eq(method = "lm", formula = y ~ x + 0) +
+  geom_smooth(method = "lm", formula = y ~ x + 0) +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5))
+
+nrow(filter_w_stand %>%
+  filter(as.numeric(SoySeedingRate_ha) <= 617500))
+    
+nt_all_vars <- stand_w_prcp %>%
+  drop_na(RyeBiomass_kgha, WeedBiomass_kgha)
+
+stand_prcp_mod <- lmer(Yield_Mgha ~  plant_prcp + (1|ExperimentName:Year:Rep) + (1|ExperimentName:Year), data = stand_w_prcp)
+summary(stand_prcp_mod)
+performance::r2(stand_prcp_mod)
+stand_prcp_emm <- emtrends(stand_prcp_mod, var = "plant_prcp")
+summary(stand_prcp_emm, infer = c(T,T))
 
 
-library(lavaan)
+stand_prcp_mod_nt <- lmer(Per_Emergence ~  plant_prcp + (1|ExperimentName:Year:Rep) + (1|ExperimentName:Year), data = stand_w_prcp)
+summary(stand_prcp_mod_nt)
+stand_prcp_emm_nt <- emtrends(stand_prcp_mod_nt, var = "plant_prcp")
+summary(stand_prcp_emm_nt, infer = c(T))
+performance::r2(stand_prcp_mod_nt)
 
-# Specify the SEM model
-model <- '
-  Yield_Mgha ~ plant_prcp
-  Per_Emergence ~ plant_prcp
-  Per_Emergence ~ Till_NT
-  Yield_Mgha ~ Till_NT
-'
+soy_emg_plot <- filter_w_stand %>%
+  ggplot(aes(x = Per_Emergence, y = Yield_Mgha)) +
+  geom_point(size = 2, aes(colour = State)) +
+  scale_color_manual(values = c("black", "red")) +
+  theme_pubr()  +
+  stat_poly_eq() +
+  geom_smooth(method = "lm") +
+  labs(y = "Soybean yield (Mg/ha)", x = "Percent emergence (%)", color = "") +
+  theme(axis.text = element_text(size = 14),
+        axis.title = element_text(size = 14),
+        legend.text = element_text(size = 14))
+
+ggsave(soy_emg_plot, filename = "Figures/soy_emg_plot.png", dpi = 300,
+       width = 8, height = 5, units = "in")
+
+ #### Looking into rye biomass with NT
+soy_nt_rye <- combined_filtered_results %>%
+  filter(Till_NT == "NT") %>%
+  group_by(Year, ExperimentName, Rep) 
+
+rye_yld_mod <- lmer(Yield_Mgha ~  RyeBiomass_kgha + (1|ExperimentName/Year/Rep), data = soy_nt_rye)
+
+summary(rye_yld_mod)
+performance::r2(rye_yld_mod) ### Super bad R^2 for just the rye biomass
+
+library(scales)
 
 
-filter_w_stand$Till_NT <- as.factor(filter_w_stand$Till_NT)
-# Fit the SEM model
-fit <- sem(model, data = filter_w_stand)
+soy_rye_yld <- soy_nt_rye %>%
+  ggplot(aes(x =RyeBiomass_kgha, y = Yield_Mgha, color = State)) +
+ # facet_wrap(~State, scales = "free") +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("black", "red")) +
+  theme_pubr()  +
+  labs(y = "Soybean yield (Mg/ha)", x = "Cereal rye biomass at termination (kg/ha)", color = "") +
+  theme(axis.text = element_text(size = 14),
+        axis.title = element_text(size = 14),
+        legend.text = element_text(size = 14))
 
-# Model summary
-summary(fit, standardized = TRUE, fit.measures = TRUE)
+ggsave(soy_rye_yld, filename = "Figures/soy_rye_yield_all.png", dpi = 300,
+       width = 8, height = 5, units = "in")
 
-library(semPlot)
 
-# Plot the SEM model
-semPaths(fit, 
-         what = "std",       # Standardized coefficients
-         edge.label.cex = 1.2, 
-         layout = "spring",  # Layout options: "circle", "tree", "spring"
-         sizeMan = 8,        # Size of manifest variables
-         sizeLat = 10,       # Size of latent variables (if any)
-         edge.color = "black")
+ny_rye <- soy_nt_rye %>%
+  filter(State == "NY") %>%
+  ungroup() %>%
+  dplyr::select(RyeBiomass_kgha)
+
+wi_rye <- soy_nt_rye %>%
+  filter(State == "WI") %>%
+  ungroup() %>% 
+  dplyr::select(RyeBiomass_kgha)
+
+
+t.test(ny_rye$RyeBiomass_kgha, wi_rye$RyeBiomass_kgha, paired = F) # T test shows that the rye biomass is significantly different in WI than NY.
+
+#### Looking at weed biomass
+
+soy_nt_weeds <- soy_nt_rye %>%
+  drop_na(WeedBiomass_kgha) %>%
+  mutate(WeedBiomass_kgha = as.numeric(WeedBiomass_kgha))
+
+soy_weed_mod <- lmer(Yield_Mgha ~  log(WeedBiomass_kgha+0.1) +  (1|ExperimentName/Year/Rep), data = soy_nt_weeds)
+
+summary(soy_weed_mod)
+check_model(soy_weed_mod)
+performance::r2(soy_weed_mod)
+
+nt_weed_plot <- soy_nt_weeds %>%
+  ggplot(aes(x = WeedBiomass_kgha, y = Yield_Mgha)) +
+  geom_point(aes(color = State)) +
+  theme_pubr() +
+  scale_color_manual(values = c("black", "red")) +
+  labs(y = "Soybean yield (Mg/ha)", x = "Weed biomass (kg/ha)", color = "") +
+  theme(axis.text = element_text(size = 14),
+        axis.title = element_text(size = 14),
+        legend.text = element_text(size = 14))
+
+ggsave(nt_weed_plot, filename = "Figures/Soy_nt_weeds.png", dpi = 300,
+       width = 8, height = 5, units = "in")
+
+
+emg_crbm <- filter_w_stand %>%
+  mutate(exp_year = paste(ExperimentName, Year)) %>%
+  drop_na(RyeBiomass_kgha) %>%
+  ggplot(aes(x = RyeBiomass_kgha, y = Per_Emergence)) +
+  geom_point(size = 2, aes(colour = State)) +
+  theme_pubr() +
+  scale_color_manual(values = c("black", "red")) +
+  geom_smooth(method = "lm") +
+  stat_poly_eq(size = 5) +
+  labs(y = "Soybean emergence (%)", x = "Cereal rye biomass at termination (kg/ha)", color = "") +
+  theme(axis.text = element_text(size = 14),
+        axis.title = element_text(size = 14),
+        legend.text = element_text(size = 14))
+
+ggsave(emg_crbm, filename = "Figures/Soy_emg_rye_bm.png", dpi = 300,
+       width = 8, height = 5, units = "in")
+
+emg_rye_mod <- lmer(Per_Emergence ~ RyeBiomass_kgha +  (1|ExperimentName:Year:Rep) + (1|ExperimentName:Year) + (1|ExperimentName), data = filter_w_stand)
+check_model(emg_rye_mod)
+performance::r2(emg_rye_mod)
+summary(emg_rye_mod)
+
+
+
+tot_model <- lmer(Yield_Mgha ~ RyeBiomass_kgha+plant_prcp+as.numeric(WeedBiomass_kgha)+Per_Emergence  + (1|ExperimentName:Year:Rep) , data = filter_w_stand)
+check_model(tot_model)
+performance::r2(tot_model)
+summary(tot_model)
 
 ```
 
@@ -692,10 +795,10 @@ meta_input <- combined_filtered_results %>%
 
 #meta_input <- left_join(meta_input, all_spring_gdd, by = c("Year", "State", "Location"))
 
-meta_input <- meta_input %>%
-  dplyr::select(-SoySeedingDate) %>%
-  rename("SoySeedingDate" = SoySeedingDate.y,
-         "ExperimentName" = ExperimentName.x)
+#meta_input <- meta_input %>%
+ # dplyr::select(-SoySeedingDate) %>%
+#  rename("SoySeedingDate" = SoySeedingDate.y,
+ #        "ExperimentName" = ExperimentName.x)
 
 meta_input$SoySeedingDate[meta_input$ExperimentName == "Starter Fertilizer Study"] = as.Date("2021-06-04", format = "%Y-%m-%d")
 meta_input$plant_prcp[meta_input$ExperimentName == "Starter Fertilizer Study"] = 7.44
@@ -705,11 +808,11 @@ meta_input %>%
   filter(State != "PA") %>%
   ggplot(aes(x = plant_prcp, y = exp(yield_gap))) +
   geom_point(aes(color = State))+
-  stat_poly_eq(formula = y~x, use_label(c("R2", "eq")), size = 5)+
+  #stat_poly_eq(formula = y~x, use_label(c("R2", "eq")), size = 5)+
   theme_pubr() +
   scale_color_manual(values = c("black", "slateblue", "red")) +
-  geom_smooth(method = "lm",formula = y ~ x,  se = FALSE, color = "gray", 
-              linetype = "dashed")  +
+ # geom_smooth(method = "lm",formula = y ~ x,  se = FALSE, color = "gray", 
+              #linetype = "dashed")  +
   theme(axis.title = element_text(size = 18),
         axis.text = element_text(size = 16),
         legend.text = element_text(size = 16),
@@ -822,27 +925,28 @@ sigma2_null <- sum(null_model$sigma2)
 pseudo_r2 <- 1 - (sigma2_metareg / sigma2_null)
 pseudo_r2 <- round(pseudo_r2, 3)
 
-p_value <- rma_prcp$pval[2]
+p_value <- metafor_metareg$pval[2]
 
 new_data$pred <- exp(pred$pred)
 new_data$ci.lb <- exp(pred$ci.lb)
 new_data$ci.ub <- exp(pred$ci.ub)
 
 # Plot the predictions with confidence intervals
-metaplot <- ggplot(new_data, aes(x = plant_prcp, y = pred)) +
-  #geom_line(color = "gray", linewidth = 1, alpha = 0.8, linetype = "dashed") +
+metaplot <- ggplot(new_data_nlme, aes(x = plant_prcp, y = pred)) +
   geom_point(data = metagen_result_final, 
              aes(x = plant_prcp, y = yield_ratio, colour = State), 
              alpha = 0.95, size = 2) +
   geom_errorbar(data = metagen_result_final,
                 aes(x = plant_prcp, y = yield_ratio,
                     ymin = lowerci_trans, ymax = upperci_trans, colour = State), width = 0.2) +
-  annotate("text", x = 4, y=1.2, label = paste("R² =", pseudo_r2, "; p =", round(p_value,3)), size = 5) +
+  annotate("text", x = 4, y=1.2, label = paste("R² =", round(pseudo_r2,3)), size = 5) +
   labs(x = "Precipitation +/- 15 days of planting (cm)", 
        y = "Ratio of no-till to tilled yield",
        color = "") +
   theme_pubr() +
-  geom_smooth(method = "lm", data = metagen_result_final, aes(x = plant_prcp, y = yield_ratio)) +
+  geom_line(data = new_data_nlme, aes(x = plant_prcp, y = predicted), color = "blue", size = 1, linetype = "dashed") +
+  geom_smooth(method = "lm", formula = y ~ x
+              ,data = metagen_result_final, aes(x = plant_prcp, y = yield_ratio)) +
   scale_color_manual(values = c("black", "red")) +
   theme(axis.text = element_text(size = 14),
         axis.title = element_text(size = 14),
@@ -851,9 +955,87 @@ metaplot <- ggplot(new_data, aes(x = plant_prcp, y = pred)) +
         plot.caption = element_text(size = 14),
         plot.caption.position = "plot",
         legend.position = "top") 
-ggsave(metaplot, filename = "Figures/metaplot_w_points_eng.png", dpi = 300,
+
+ggsave(metaplot, filename = "Figures/metaplot_w_points_nlme.png", dpi = 300,
        width = 9, height = 6, units = "in")
 
+### Looking at non-linear function
+library(nlme)
+set.seed(123)
+
+# Fit nonlinear model
+fit <- nls(yield_ratio ~ L + (U - L) / (1 + exp(-k * (plant_prcp - x0))),
+           data = metagen_result_final,
+           start = list(L = 0.5, U = 1.1, k = 0.7, x0 = 8))
+summary(fit)
+
+group_data <- groupedData(yield_ratio~plant_prcp|as.factor(ExperimentName), data = metagen_result_final)
+
+nlme_fit <- nlme(yield_ratio ~ L + (U - L) / (1 + exp(-k * (plant_prcp - x0))),
+           data = group_data,
+           start = c(L = 0.5, U = 1.1, k = 0.7, x0 = 8),
+           fixed = L + U + k + x0 ~ 1,
+           random = U ~ 1 |State,
+           method = "ML")
+
+plot(augPred(nlme_fit))
+nlme::augPred(nlme_fit, data = getData(nlme_fit))
+
+metagen_result_final$pred_group <- predict(nlme_fit, level = 1)
+
+metagen_result_final %>%
+  dplyr::select(ExperimentName, pred_fixed, pred_group, plant_prcp) %>%
+  pivot_longer(cols = c(pred_fixed, pred_group), names_to = "pred", values_to = "value") %>%
+  ggplot(aes(y = value, x = plant_prcp, color = pred)) +
+  geom_point() +
+  geom_line() +
+  theme_pubr()
+
+
+
+nlme_ran <- ranef(nlme_fit)$U
+qqnorm(nlme_ran)
+qqline(nlme_ran)
+
+
+
+summary(nlme_fit)
+check_model(nlme_fit)
+new_data_nlme <- data.frame(
+  plant_prcp = seq(min(metagen_result_final$plant_prcp),
+                   max(metagen_result_final$plant_prcp),
+                   length.out = 100),
+  site_year = NA  # so random effect is not added
+)
+library(nlraa)
+
+cor(predict(nlme_fit, level = 1), metagen_result_final$yield_ratio)^2
+
+metagen_result_final$pred_fixed <- predict(nlme_fit, level = 0)
+
+resid_fixed <- metagen_result_final$yield_ratio - metagen_result_final$pred_fixed
+
+ss_res_fixed <- sum(resid_fixed^2)
+ss_total <- sum((metagen_result_final$yield_ratio - mean(metagen_result_final$yield_ratio))^2)
+r2_marginal <- 1 - ss_res_fixed / ss_total
+
+# Predict using only fixed effects
+new_data_nlme$predicted <- predict(nlme_fit, newdata = new_data_nlme, level = 0)
+
+em_nlme <- emmeans(nlme_fit, ~ plant_prcp, at = list(plant_prcp = 10), 
+                        param = names(fixef(nlme_fit)),)
+
+summary(em_nlme, infer = c(TRUE, TRUE), level = 0.95)
+# Calculate RMSE and pseudo-R²
+residuals <- residuals(nlme_fit)
+rmse <- sqrt(mean(residuals^2))
+ss_total <- sum((metagen_result_final$yield_ratio - mean(metagen_result_final$yield_ratio))^2)
+ss_residual <- sum(residuals^2)
+pseudo_r2 <- 1 - (ss_residual / ss_total)
+###
+
+nlme_ci <- intervals(nlme_fit, which = "fixed")$fixed
+pred_se <- sqrt(t(c(1, 10)) %*% vcov(nlme_fit) %*% c(1, 10))
 
 yield_ratio <- seq(0.6,1,0.1)
 precip_by_ratio <- rep(NA, length(yield_ratio))
@@ -863,6 +1045,45 @@ for(i in 1:length(yield_ratio)){
 }
 precip_by_ratio_df <- data.frame(yield_ratio, precip_by_ratio)
 
+
+
+### Looking at NLME and confidence intervals
+x_vals <- seq(min(metagen_result_final$plant_prcp),
+              max(metagen_result_final$plant_prcp),
+              length.out = 100)
+
+newdata <- data.frame(plant_prcp = x_vals)
+
+# Bootstrap predictions
+set.seed(123)
+boot_preds <- replicate(300, {
+  boot_data <- metagen_result_final[sample(nrow(metagen_result_final), replace = TRUE), ]
+  fit_try <- try(update(nlme_fit, data = boot_data), silent = TRUE)
+  if (inherits(fit_try, "try-error")) return(rep(NA, length(x_vals)))
+  predict(fit_try, newdata = newdata, level = 0)
+})
+
+# Clean up failed bootstraps
+boot_preds <- boot_preds[, colSums(is.na(boot_preds)) == 0]
+
+# Calculate 95% CI bands
+ci_lower <- apply(boot_preds, 1, quantile, probs = 0.025)
+ci_upper <- apply(boot_preds, 1, quantile, probs = 0.975)
+ci_mean  <- apply(boot_preds, 1, mean)
+
+plot(yield_ratio ~ plant_prcp, data = metagen_result_final, pch = 16, col = 'gray')
+lines(x_vals, ci_mean, col = "blue", lwd = 2)
+lines(x_vals, ci_lower, col = "blue", lty = 2)
+lines(x_vals, ci_upper, col = "blue", lty = 2)
+
+
+target_y <- 0.89
+
+x_lo <- approx(x = ci_lower, y = x_vals, xout = target_y)$y
+x_hi <- approx(x = ci_upper, y = x_vals, xout = target_y)$y
+
+cat("Approximate x-range where CI includes y =", target_y, ":\n")
+cat("From x ≈", round(x_lo, 2), "to x ≈", round(x_hi, 2), "\n")
 ```
 
 ```{r APSIM Yield Data}
@@ -1074,6 +1295,7 @@ nse <- 1-(nse_top/nse_bot)
 
 ```{r Solar radiation Data}
 library(daymetr)
+library(nasapower)
 
 # Example: Daily data for 2022
 mus_srad <- download_daymet(
@@ -1191,24 +1413,365 @@ cor(climod_no2016$plant_prcp , mus_pcp_no2016$plant_prcp)^2
 sqrt(1/nrow(climod_no2016)*sum((mus_pcp_no2016$plant_prcp-climod_no2016$plant_prcp)^2))
 mean(climod_no2016$plant_prcp)
 
+
+#### Looking at soil water balance to find deficit at planting
+
+lat_mus <- 42.734
+lon_mus <- -76.657    
+start_date <- "1981-01-01"
+end_date <- "2024-12-31"
+
+# Get daily data for a single point
+power_data <- get_power(
+  community = "AG",         # Agricultural data
+  lonlat = c(lon_mus, lat_mus),
+  pars = c("ALLSKY_SFC_SW_DWN"),  
+  dates = c(start_date, end_date)
+)
+power_clean <- power_data %>%
+  drop_na() %>%
+  mutate(date = YYYYMMDD,
+         rad_n = ALLSKY_SFC_SW_DWN) %>%
+  dplyr::select(date, rad_n)
+
+
+calc_pt_et <- function(tmin, tmax, rs, albedo = 0.23, alpha = 1.26, lambda = 2.45, gamma = 0.0665) {
+  
+  # Mean temperature
+  tmean <- (tmin + tmax) / 2
+  
+  # Saturation vapor pressure (kPa)
+  es <- 0.6108 * exp((17.27 * tmean) / (tmean + 237.3))
+  
+  # Slope of saturation vapor pressure curve (Δ, in kPa/°C)
+  delta <- (4098 * es) / ((tmean + 237.3)^2)
+  
+  # Net radiation (Rn) approximation (MJ/m²/day)
+  rn <- (1 - albedo) * rs
+  
+  # Priestley-Taylor ET₀ (mm/day)
+  eto <- alpha * (delta / (delta + gamma)) * rn / lambda
+  
+  return(eto)
+}
+
+prism_power <- left_join(musgrave_prism,power_clean) %>%
+  drop_na() %>%
+  mutate(aw_cm = rep(NA),
+         excess_cm = rep(NA),
+         pet_cm = calc_pt_et(tmin = mint_c, tmax = maxt_c, rs = rad_n)/10)
+
+awc <- 0.15
+depth <- 30
+wp <- 0.12
+wp_cm <- wp*depth
+
+awc_cm <- awc*depth
+prism_power$aw_cm[1] <- awc_cm
+
+
+for(i in 2:nrow(prism_power)){
+  pet <- prism_power$pet_cm[i]
+  precip <- prism_power$prcp_cm[i]
+  pet_n_cm <- pet - precip
+  aw_prev <- prism_power$aw_cm[i-1]
+  
+  if(pet_n_cm == 0){
+    aw <- aw_prev
+  } else if (pet_n_cm > 0){
+    aw <- aw_prev*exp(-pet/awc_cm)
+  } else if (pet_n_cm < 0 && (aw_prev-pet_n_cm) <= awc_cm){
+    aw <- aw_prev-pet_n_cm
+  } else{
+    aw <- awc_cm
+  }
+  prism_power$aw_cm[i] <- aw
+}
+
+prism_power_all <- prism_power %>%
+  mutate(pet_n_cm = pet_cm - prcp_cm,
+         excess_cm = case_when(pet_n_cm < 0 & dplyr::lag(aw_cm)-pet_n_cm > awc_cm ~ lag(aw_cm)-pet_n_cm-awc_cm,
+                               .default = 0),
+         et = pet_cm*(aw_cm/awc_cm),
+         swd_cm = aw_cm-(0.12*depth)
+  )
+
+prism_power_all <- prism_power %>%
+  mutate(
+    doy = yday(date),
+    kc = case_when(
+      doy <= 90 ~ 0.4,
+      doy <= 120 ~ 0.4 + (doy - 90) * (0.4 / 30) ,   # Apr 1–Apr 30: linear 0.4 to 0.8
+      doy <= 150 ~ 0.8 + (doy - 120) * (0.2 / 30),  # May 1–May 30: 0.8 to 1.0
+      doy <= 160 ~ 1.0 - (doy - 150) * (0.6 / 10),  # June 1–June 10: senescence
+      TRUE ~ 0.4  # after termination or mowing
+    ),
+    aet_cm = pet_cm * kc  # or et0_cm if using that
+  )
+
+
+ ### gpt
+for(i in 2:nrow(prism_power_all)){
+  pet <- prism_power_all$pet_cm[i]
+  precip <- prism_power_all$prcp_cm[i]
+  net_pet <- pet - precip
+  aw_prev <- prism_power_all$aw_cm[i - 1]
+  
+  if (net_pet > 0) {
+    aw <- max(aw_prev - net_pet, 0)
+  } else {
+    aw <- min(aw_prev - net_pet, awc_cm)
+  }
+  
+  prism_power_all$aw_cm[i] <- aw
+}
+
+prism_power_all <- prism_power_all %>%
+  mutate(
+    net_pet_cm = pet_cm - prcp_cm,
+    et_cm = pet_cm * (aw_cm / awc_cm),
+    swd_cm = pmin(aw_cm - (0.12*depth),0),
+    excess_cm = pmax(0, aw_cm + prcp_cm - pet_cm - awc_cm)
+  )
+
+
+
+### GPT approach for each year as independent
+planting_dates_df <- musgrave_plant_prcp %>%
+  dplyr::select(ExperimentName, SoySeedingDate, Year)
+
+prism_power_all <- prism_power_all %>%
+  mutate(
+    Year = year(date),
+    doy = yday(date)
+  ) %>%
+  filter(Year %in% planting_dates_df$Year) %>%
+  left_join(
+    planting_dates_df %>%
+      mutate(planting_doy = yday(SoySeedingDate)),
+    by = "Year"
+  )
+
+soil_balance_by_year <- list()
+
+# Set constants
+depth <- 30        # cm
+awc <- 0.15        # cm/cm
+awc_cm <- awc * depth
+wp <- 0.12         # wilting point (cm/cm)
+wp_cm <- wp * depth
+
+# Initialize result list
+soil_balance_by_year <- list()
+
+# Loop over years
+for(yr in unique(prism_power_all$Year)) {
+  yearly_data <- prism_power_all %>%
+    filter(Year == yr, doy <= planting_doy+15) %>%
+    arrange(date)
+  
+  n_days <- nrow(yearly_data)
+  aw_vector <- numeric(n_days)
+  aw_vector[1] <- awc_cm  
+
+  for(i in 2:n_days){
+    stress <- max((aw_vector[i - 1] / awc_cm), 0.1)^0.5
+    
+    aet <- yearly_data$aet_cm[i]*stress
+    precip <- yearly_data$prcp_cm[i]
+    net <- aet - precip
+    aw_prev <- aw_vector[i-1]
+    
+    aw <- max(min(aw_prev - net, awc_cm), 0)  # constrain to [WP, AWC]
+    aw_vector[i] <- aw
+  }
+  
+  # Add results to the data frame
+  yearly_data$aw_cm <- aw_vector
+  yearly_data$swd_cm <- aw_vector - wp_cm  
+  
+  soil_balance_by_year[[as.character(yr)]] <- yearly_data
+}
+
+# Combine all years
+final_soil_balance <- bind_rows(soil_balance_by_year)
+
+final_soil_balance %>%
+  mutate(exp_year = paste0(ExperimentName,"-",Year)) %>%
+  ggplot(aes(x = date, y = swd_cm)) +
+  facet_wrap(~exp_year, scales = "free_x") +
+  geom_point() +
+  geom_line() +
+  geom_vline(aes(xintercept = SoySeedingDate), color = "red") +
+  theme_pubr()
+
+
+swd_at_plant <- final_soil_balance %>%
+  group_by(Year) %>%
+  summarise(swd_plant = mean(swd_cm[doy >= planting_doy-15 & doy <= planting_doy+15])) %>%
+  mutate(State = rep("NY"))
+
+mus_ratios$Year <- year(mus_ratios$SoySeedingDate)
+
+swd_mus <- left_join(mus_ratios, swd_at_plant) %>%
+  filter(Year < 2024)
+
+cor(swd_mus$yield_ratio, swd_mus$plant_prcp)^2
+
+swd_mus %>%
+  ggplot(aes(x = swd_plant, y = yield_ratio)) +
+  geom_point() +
+  theme_pubr() +
+  stat_poly_eq()
+
+### Everything for Wisconsin 
+
+lat_arl <- 43.30294
+lon_arl <- -89.34670   
+start_date <- "1981-01-01"
+end_date <- "2024-12-31"
+
+# Get daily data for a single point
+power_data_wi <- get_power(
+  community = "AG",         
+  lonlat = c(lon_arl, lat_arl),
+  pars = c("ALLSKY_SFC_SW_DWN"),  
+  dates = c(start_date, end_date)
+)
+
+power_clean_wi <- power_data_wi %>%
+  drop_na() %>%
+  mutate(date = YYYYMMDD,
+         rad_n = ALLSKY_SFC_SW_DWN) %>%
+  dplyr::select(date, rad_n)
+
+prism_power_wi <- left_join(arlington_prism,power_clean_wi) %>%
+  drop_na() %>%
+  mutate(aw_cm = rep(NA),
+         excess_cm = rep(NA),
+         pet_cm = calc_pt_et(tmin = mint_c, tmax = maxt_c, rs = rad_n)/10)
+
+planting_dates_df_wi <- wi_plant_prcp %>%
+  dplyr::select(ExperimentName, SoySeedingDate, Year)
+
+prism_power_all_wi <- prism_power_wi %>%
+  mutate(
+    doy = yday(date),
+    kc = case_when(
+      doy <= 90 ~ 0.4,
+      doy <= 120 ~ 0.4 + (doy - 90) * (0.4 / 30) ,   # Apr 1–Apr 30: linear 0.4 to 0.8
+      doy <= 150 ~ 0.8 + (doy - 120) * (0.2 / 30),  # May 1–May 30: 0.8 to 1.0
+      doy <= 160 ~ 1.0 - (doy - 150) * (0.6 / 10),  # June 1–June 10: senescence
+      TRUE ~ 0.4  # after termination or mowing
+    ),
+    aet_cm = pet_cm * kc  # or et0_cm if using that
+  )
+
+prism_power_all_wi <- prism_power_all_wi %>%
+  mutate(
+    Year = year(date),
+    doy = yday(date)
+  ) %>%
+  filter(Year %in% planting_dates_df_wi$Year) %>%
+  left_join(
+    planting_dates_df_wi %>%
+      mutate(planting_doy = yday(SoySeedingDate)),
+    by = "Year"
+  )
+
+soil_balance_by_year <- list()
+
+# Set constants
+depth <- 30        # cm
+awc_wi <- 0.23       # cm/cm
+awc_cm_wi <- awc_wi * depth
+wp_wi <- 0.153         # wilting point (cm/cm)
+wp_cm_wi <- wp_wi * depth
+
+# Initialize result list
+soil_balance_by_year_wi <- list()
+
+# Loop over years
+for(yr in unique(prism_power_all_wi$Year)) {
+  yearly_data <- prism_power_all_wi %>%
+    filter(Year == yr, doy <= planting_doy+15) %>%
+    arrange(date)
+  
+  n_days <- nrow(yearly_data)
+  aw_vector <- numeric(n_days)
+  aw_vector[1] <- awc_cm_wi  
+
+  for(i in 2:n_days){
+    stress <- max((aw_vector[i - 1] / awc_cm_wi), 0.1)^0.5
+    
+    aet <- yearly_data$aet_cm[i]*stress
+    precip <- yearly_data$prcp_cm[i]
+    net <- aet - precip
+    aw_prev <- aw_vector[i-1]
+    
+    aw <- max(min(aw_prev - net, awc_cm_wi), 0)  # constrain to [WP, AWC]
+    aw_vector[i] <- aw
+  }
+  
+  # Add results to the data frame
+  yearly_data$aw_cm <- aw_vector
+  yearly_data$swd_cm <- aw_vector - wp_cm_wi  
+  
+  soil_balance_by_year_wi[[as.character(yr)]] <- yearly_data
+}
+
+# Combine all years
+final_soil_balance_wi <- bind_rows(soil_balance_by_year_wi)
+
+final_soil_balance_wi %>%
+  mutate(exp_year = paste0(ExperimentName,"-",Year)) %>%
+  ggplot(aes(x = date, y = swd_cm)) +
+  facet_wrap(~exp_year, scales = "free_x") +
+  geom_point() +
+  geom_line() +
+  geom_vline(aes(xintercept = SoySeedingDate), color = "red") +
+  theme_pubr()
+
+
+swd_at_plant_wi <- final_soil_balance_wi %>%
+  group_by(Year) %>%
+  summarise(swd_plant = mean(swd_cm[doy >= planting_doy-15 & doy <= planting_doy+15])) %>%
+  mutate(State = rep("WI"))
+
+
+swd_ny_wi <- rbind(swd_at_plant, swd_at_plant_wi) 
+
+all_ratios <- metagen_result_final_1 %>%
+  dplyr::select(State, Year, ExperimentName, yield_ratio)
+
+
+swd_ratio_all <- left_join(swd_ny_wi, all_ratios)
+
+swd_ratio_all %>%
+  filter(ExperimentName != "Mowtivation") %>%
+  ggplot(aes(x = swd_plant, y = yield_ratio)) +
+  geom_point(aes(color = State)) +
+  geom_text(aes(label = paste0(ExperimentName," ", Year))) +
+  stat_poly_eq() +
+  theme_pubr()
+#### Although this looks cool, I think there are too many assumptions being made, especially in the period post soybean planting. Therefore it may be more straightforward to stick with precipitation and let the soil water balance stuff rest for now. 
+
 ```
 
 ```{r Soybean ANCOVA}
 ancova_data <- combined_filtered_results %>%
   mutate(Till_NT = as.factor(Till_NT),
-         pdoy = yday(SoySeedingDate.x))
+         pdoy = yday(SoySeedingDate.x)) %>%
+  filter(Year < 2024)
 
 ancova_data$plant_prcp[ancova_data$ExperimentName == "Starter Fertilizer Study"] <- 7.44
 
-ancova_mod1 <- lmer(Yield_Mgha ~ (Till_NT) * log(plant_prcp) *State + (1|State:ExperimentName:Year:block) + (1|State:ExperimentName:Year) +
-                     (1|ExperimentName),
-                   data = ancova_data) 
-
-ancova_mod2 <-  lmer(Yield_Mgha ~ (Till_NT) * plant_prcp * State + (1|State:ExperimentName:Year:block) + (1|State:ExperimentName:Year) +
+ancova_mod2 <-  lmer(Yield_Mgha ~ Till_NT*plant_prcp + (1|State:ExperimentName:Year:block) + (1|State:ExperimentName:Year) +
                      (1|ExperimentName),
                    data = ancova_data)
-AIC(ancova_mod1, ancova_mod2)
-anova(ancova_mod1, ancova_mod2)
+
+car::Anova(ancova_mod2, type =3)
+
 
 summary(ancova_mod2)
 check_model(ancova_mod2)
@@ -1219,13 +1782,15 @@ qqline(resid(ancova_mod2))
 
 plot(ancova_mod2)
 
-emtrends(ancova_mod2,pairwise ~ Till_NT*State, var = "plant_prcp")
-emmeans(ancova_mod2, ~ Till_NT|State, at = list(plant_prcp = 0))
+ancova_slopes <- emtrends(ancova_mod2,pairwise ~ Till_NT, var = "plant_prcp")
+summary(ancova_slopes, infer = c(T, T))
 
-nt_eq <- "y = 0.072x + 2.19"
-till_eq <- "y = -0.0246x + 3.86"
 
-emmip(ancova_mod2, Till_NT|State ~ plant_prcp, cov.reduce = range)
+emmeans(ancova_mod2, ~ Till_NT, at = list(plant_prcp = 0))
+
+
+
+emmip(ancova_mod2, Till_NT ~ plant_prcp, cov.reduce = range)
 
 
 library(ggeffects)
@@ -1234,7 +1799,6 @@ gg_preds <- ggpredict(ancova_mod2, terms = c("plant_prcp","Till_NT"))
 
 summary(ancova_mod2)
 fixed_effects <- fixef(ancova_mod)
-
 
 #till_eq <- paste0("y = ", round(fixed_effects[1],3), " + ", round(fixed_effects[3],3), "x")
 #nt_eq <- paste0("y = ",round(fixed_effects[1]+fixed_effects[2],3), " + ", round(fixed_effects[3]+fixed_effects[4],3),"x")
@@ -1249,14 +1813,18 @@ ancova_plot <- ancova_data %>%
   scale_color_manual(values = c("black", "red"))+
   scale_shape_manual(values = c("triangle","square")) +
   scale_fill_manual(values = c("black","red")) +
-  annotate("text", x = 12, y = 5, label = nt_eq, color = "black", size = 5) +
-  annotate("text", x = 12, y = 4.8, label = till_eq, color = "red", size = 5) +
+  #annotate("text", x = 12, y = 5, label = nt_eq, color = "black", size = 5) +
+  #annotate("text", x = 12, y = 4.8, label = till_eq, color = "red", size = 5) +
   theme_pubr() + 
   labs(y = "Soybean yield (Mg/ha)", x = "Precipitation recieved +/- 15 days of planting (cm)", fill = "", shape = "", color = "") +
   guides(fill = "none") +
   theme(axis.title = element_text(size = 14),
         axis.text = element_text(size = 12),
         legend.text = element_text(size = 12))
+
+
+stand_model
+
 
 doy_mod <-  lmer(Yield_Mgha ~ (Till_NT) * pdoy + (1|State:ExperimentName:Year:block) + (1|State:ExperimentName:Year) +
                      (1|ExperimentName),
@@ -1269,7 +1837,9 @@ hist(resid(doy_mod))
 qqnorm(resid(doy_mod))
 qqline(resid(doy_mod))
 
-emtrends(doy_mod,pairwise ~ Till_NT, var = "pdoy")
+doy_trends <- emtrends(doy_mod,pairwise ~ Till_NT, var = "pdoy")
+summary(doy_trends, infer = c(T,T))
+
 emmeans(doy_mod, ~ Till_NT, at = list(pdoy = 0))
 
 gg_preds_doy <- ggpredict(doy_mod, terms = c("pdoy","Till_NT"))
@@ -1318,9 +1888,9 @@ get_window_sums_multiple_doys <- function(weather_data, doy_targets, window_size
 
 musgrave_doys <- unique(yday(combined_filtered_results$SoySeedingDate.x[combined_filtered_results$Location == "Musgrave"]))
 
-precip_sums_mus <- get_window_sums_multiple_doys(musgrave_prism, seq(150,170,3))
+precip_sums_mus <- get_window_sums_multiple_doys(musgrave_prism, seq(150,170,1))
 
-target_value_ny <- precip_by_ratio[4] #### From the meta analysis, this is the precipitation to get 90% of the till yield in NT
+target_value_ny <- 10 #### From the meta analysis, this is the precipitation to get 90% of the till yield in NT
 
 return_periods_df <- precip_sums_mus %>%
   group_by(DOY) %>%
@@ -1372,7 +1942,7 @@ return_curves_df %>%
 
 wi_doys <- unique(yday(combined_filtered_results$SoySeedingDate.x[combined_filtered_results$Location == "AARS"]))
 
-precip_sums_arl <- get_window_sums_multiple_doys(arlington_prism, seq(150,170,3))
+precip_sums_arl <- get_window_sums_multiple_doys(arlington_prism, seq(150,170,2))
 
 return_curves_wi <- precip_sums_arl %>% 
   filter(SumPrecip > 0) %>%
@@ -1392,7 +1962,7 @@ return_curves_wi <- precip_sums_arl %>%
     })
   )
 
-target_value_wi <- precip_by_ratio[4]
+target_value_wi <- 10
 return_periods_df_wi <- precip_sums_arl %>%
   group_by(DOY) %>%
   arrange(desc(SumPrecip)) %>%
@@ -1430,4 +2000,144 @@ return_curves_df_wi %>%
   geom_hline(yintercept = 13.53, color = "red") #### This plot hints that Wisconsin frequently gets more sufficient rain for this system to work at getting 90% of Till yield in NT
 ```
 
+```{r Conditional Inference Tree}
+library(partykit)
+library(ggparty)
+
+soybean_precip <- soy_rye_std %>%
+  left_join(all_plant_prcp, by = c("Year", "State")) %>%
+  mutate(pdoy = yday(as.Date(SoySeedingDate.x, format = "%m/%d/%y")),
+         WeedBiomass_kgha = as.numeric(WeedBiomass_kgha),
+         Till_NT = as.factor(Till_NT),
+         State = as.factor(State),
+         exp_treat = as.factor(ExperimentalTrt)) %>% 
+  filter(Year < 2024) %>%
+  dplyr::select(Year,State, Till_NT, Yield_Mgha, plant_prcp, WeedBiomass_kgha, pdoy) %>%
+  mutate(year_fac = as.factor(Year)) %>%
+  drop_na()
+
+control = ctree_control(mincriterion = 1-(.05*ncol(soybean_precip)-1))
+
+cit_soy <- ctree(Yield_Mgha ~ as.factor(State) + Till_NT + plant_prcp, data = ancova_data)
+
+pred_soy <- predict(cit_soy)
+obs_soy <- ancova_data$Yield_Mgha
+
+rmse <- sqrt(mean((obs_soy - pred_soy)^2))
+
+ss_res <- sum((obs_soy - pred_soy)^2)
+ss_tot <- sum((obs_soy - mean(obs_soy))^2)
+r2 <- 1 - (ss_res / ss_tot)
+
+nrmse <- rmse/mean(obs_soy)
+
+nse <- 1 - (sum((obs_soy - pred_soy)^2) / sum((obs_soy - mean(obs_soy))^2))
+
+plot(cit_soy)
+
+# extract p-values
+pvals <- unlist(nodeapply(cit_soy, ids = nodeids(cit_soy), function(n) info_node(n)$p.value))
+pvals <- pvals[pvals <.05]
+# plotting
+ggparty(cit_soy) +
+  geom_edge() +
+  geom_edge_label() +
+  geom_node_label(line_list = list(aes(label = splitvar),
+                                   aes(label = paste0("N=", nodesize, ", p", 
+                                                      ifelse(pvals < .001, "<.001", paste0("=", round(pvals, 3)))), 
+                                       size = 10)),
+                  line_gpar = list(list(size = 13), 
+                                   list(size = 10)), 
+                  ids = "inner") +
+  geom_node_label(aes(label = paste0("Node ", id, ", N = ", nodesize)),
+    ids = "terminal", nudge_y = -0.0, nudge_x = 0.01) +
+  geom_node_plot(gglist = list(
+    geom_bar(position = position_fill(), color = "black"),
+      theme_minimal(),
+      scale_fill_manual(values = c("gray50", "gray80"), guide = FALSE),
+      scale_y_continuous(breaks = c(0, 1)),
+    xlab(""), 
+    ylab("Mean soy yield (Mg/ha"),
+    shared_axis_labels = TRUE))
+
+ggparty(cit_soy) +
+  geom_edge() +
+  geom_edge_label() +
+  geom_node_splitvar(aes(label = splitvar),
+                     ids = "inner") +
+  geom_node_label(aes(label = info),
+                  ids = "terminal")
+
+
+soy_nt <- soy_rye_std %>%
+  mutate(SoySeedingDate = as.Date(SoySeedingDate, format = "%m/%d/%y")) %>%
+  left_join(all_plant_prcp) %>%
+  filter(Till_NT == "NT") %>%
+  mutate(pdoy = yday(SoySeedingDate),
+         WeedBiomass_kgha = as.numeric(WeedBiomass_kgha),
+         Till_NT = as.factor(Till_NT),
+         State = as.factor(State),
+         exp_treat = as.factor(ExperimentalTrt)) %>% 
+  filter(Year < 2024) %>%
+  dplyr::select(Year,State, Till_NT, Yield_Mgha, plant_prcp, RyeBiomass_kgha) %>%
+  mutate(year_fac = as.factor(Year)) %>%
+  drop_na()
+
+cit_nt <- ctree(Yield_Mgha ~ State + plant_prcp + RyeBiomass_kgha, data = soy_nt)
+plot(cit_nt)
+
+stand_w_prcp <- filter_w_stand %>%
+  left_join(all_plant_prcp)
+
+stand_tree <- ctree(Yield_Mgha ~ as.factor(Till_NT) + plant_prcp + Per_Emergence, data = stand_w_prcp)
+plot(stand_tree)
+```
+
+```{r Saxton and Rawls Pedotransfer Function}
+#### Function to estimate field capacity (theta 33 kpa) and wilting point (theta 1500 kpa) from soil textural data. 
+#### Equations from Saxton and Rawls 2006 paper Soil Water Characteristic Estimates by Texture and Organic Matter for Hydrologic Solutions
+
+sax_rawl_fc_wp <- function(sand, silt, clay, org_mat = 0.03){
+  theta_1500t <- (-0.024*sand)+(0.487*clay)+(0.006*org_mat)+(0.005*(sand*org_mat))-(0.013*clay*org_mat)+(0.068*clay*sand)+0.031
+  theta_1500 <- theta_1500t + ((0.14*theta_1500t)-0.02)
+  
+  theta_33t <- (-0.251*sand)+(0.195*clay)+(0.011*org_mat)+(0.006*sand*org_mat)-(0.027*clay*org_mat)+(0.452*sand*clay)+0.299
+  theta_33 <- theta_33t + (1.283*(theta_33t)^2-0.374*theta_33t-0.015)
+  
+  soil_wat_df <- data.frame(theta_1500, theta_33)
+  return(soil_wat_df)
+}
+
+sax_rawl_fc_wp(sand = 0.26, silt = 0.55, clay = 0.19, org_mat = 0.035)
+```
+
+```{r OCS Soil Moisture Data}
+ocs_vwc <- read_csv("~/Downloads/ocs_soilmoist_june25.csv")
+
+ocs_vwc$channel_name[ocs_vwc$sensor_sn == "21978491-1"] <- "Soil water content (m³/m³) Zone 1"
+ocs_vwc$channel_name[ocs_vwc$sensor_sn == "21978491-2"] <- "Soil water content (m³/m³) Zone 2"
+  
+ocs_vwc_upd <- ocs_vwc %>%
+  separate_wider_delim(alias, delim = "-", names = c("plot", "mgmt")) %>%
+  mutate(plot = trimws(plot)) %>%
+  mutate(crop = case_when(
+    endsWith(plot,"A") ~ "Corn",
+    endsWith(plot,"B") ~ "Soybean"
+  )) %>%
+  mutate(date = as.POSIXct(time, format = "%m/%d/%y %H:%M"),
+         month = month(date),
+         day = day(date)) %>%
+  group_by(month, day, sensor_sn) %>%
+  mutate(avg_daily_vwc = mean(value))
+
+ocs_vwc_upd %>%
+  ggplot(aes(x = day, y = avg_daily_vwc, colour = plot, linetype = mgmt)) +
+  geom_line() +
+  facet_wrap(crop~channel_name) +
+  theme_pubr() +
+  labs(linetype = "", colour = "", y = "Average Daily VWC (mm/mm)",
+       x = "Day of June 2025")
+
+
+```
 
