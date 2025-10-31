@@ -29,6 +29,7 @@ library(ggpubr)
 library(performance)
 library(janitor)
 library(fitdistrplus)
+library(Metrics)
 
 options(contrasts = c("contr.sum", "contr.poly")) #setting contrasts
 ```
@@ -320,15 +321,27 @@ planting_precip <- function(met_df, mgmt_df, station_site){
   return(plant_prcp)
 }
 
-#More functions to come depending on variables that we investigate, but format will be similar regardless of variable
-musgrave_plant_prcp <- planting_precip(met_df = musgrave_prism, mgmt_df = soy_rye_useful, station_site = "Musgrave")
-wi_plant_prcp <- planting_precip(met_df = arlington_prism, mgmt_df = soy_rye_useful, station_site = "AARS")
-geneva_plant_prcp <- planting_precip(met_df = geneva_prism, mgmt_df = soy_rye_useful, station_site = "Geneva")
-psu_plant_prcp <- planting_precip(met_df = psu_prism,
-                                  mgmt_df = soy_rye_useful, 
-                                  station_site = "Rock Springs")
+iem_mus <- read_csv("R_data/Weather_data/mus_iem.csv")
+iem_mus <- iem_mus %>%
+  mutate(Year = year,
+         doy = day,
+         prcp_cm = rain/10,
+         Location = rep("Musgrave"))
+  
+iem_aars <- read_csv("R_data/Weather_data/aars_iem.csv")
+iem_aars <- iem_aars %>%
+  mutate(Year = year,
+         doy = day,
+         prcp_cm = rain/10,
+         Location = rep("AARS"))
 
-all_plant_prcp <- rbind(musgrave_plant_prcp, wi_plant_prcp, geneva_plant_prcp, psu_plant_prcp)
+
+#More functions to come depending on variables that we investigate, but format will be similar regardless of variable
+musgrave_plant_prcp <- planting_precip(met_df = iem_mus, mgmt_df = soy_rye_useful, station_site = "Musgrave")
+wi_plant_prcp <- planting_precip(met_df = iem_aars, mgmt_df = soy_rye_useful, station_site = "AARS")
+
+
+all_plant_prcp <- rbind(musgrave_plant_prcp, wi_plant_prcp)
 comb_soy_prcp <- left_join(soy_rye_useful, all_plant_prcp, by = c("Year", "State", "Location", "ExperimentName"))
 ```
 
@@ -351,12 +364,17 @@ rye_biomass <- function(mgmt_df, station_site){
 
 all_rye<- rye_biomass(soy_rye_useful)
 
+
 mus_wi_rye <- all_rye %>%
   filter(Location %in% c("Musgrave", "AARS")) %>%
   drop_na() %>%
   group_by(Location, ExperimentName, Year) %>%
   summarise(rye_mean = mean(rye_bm)) %>%
   ungroup()
+
+rye_by_state <- mus_wi_rye %>%
+  group_by(Location) %>%
+  summarise(mean_rye = mean(rye_mean))
 
 exps_w_rye <- mus_wi_rye$ExperimentName
 
@@ -430,6 +448,8 @@ summary(wi_2018_mod)
 check_model(wi_2018_mod)
 emmeans(wi_2018_mod, pairwise ~ split_plot|main_plot, type = "response")
 
+ocs_inputs <- ocs_inputs %>%
+  filter(Year == 2018)
 
 combined_filtered_results <- rbind(barns_inputs, moss_inputs, sf_filter_inputs, sd_filter_inputs,
                                    coulter_study_inputs, wi_2020, wi_2019, mowtivation_filter,
@@ -544,9 +564,40 @@ contrast_plus_data %>%
 ```{r Looking at stand count}
 # Soybean density of NT treatments
 filter_w_stand <- combined_filtered_results %>%
-  filter(Till_NT == "NT") %>%
-  group_by(Year, ExperimentName) %>%
+  #filter(Till_NT == "NT") %>%
+  group_by(Year, ExperimentName, Till_NT) %>%
   drop_na(SoyStand_ha) 
+
+filter_w_stand %>%
+  ggplot(aes(x = site_year, y = Per_Emergence, colour = Till_NT)) +
+  geom_point() +
+  facet_wrap(~Location, scales = "free_x", nrow = 2) +
+  theme_pubr()
+
+
+stand_per_year <-site_yearstand_per_year <- filter_w_stand %>%
+  group_by(site_year, Till_NT) %>%
+  summarise(stand_m2 = mean(SoyStand_ha/10000),
+            seed_m2 = mean(as.numeric(SoySeedingRate_ha)/10000))
+
+def_stands <- c(-41.64,8.68,1.62,0.073,-6.76,7.77,47.05,23.43,8.91, 21.78, -92.93, -133, -17.61, 
+                -29.6, -50.14, -27.6, 20.3, -46.78, 4.43, -85.44, -15.22, -42.31, 1.9)
+stand_w_def <- data.frame(stand_per_year, def_stands)
+stand_w_def <- stand_w_def %>%
+  mutate(per_stand = stand_m2/seed_m2,
+         site = case_when(
+                          startsWith(site_year,"A") ~ "AARS",
+                          startsWith(site_year, "M") ~ "Musgrave"))
+
+stand_w_def %>%
+  filter(site_year  != c("Musgrave-2024","Musgrave-2023")) %>%
+  ggplot(aes(x = def_stands, y = per_stand, color = site, shape = Till_NT)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = F) +
+  stat_poly_eq(use_label(c("eq","R2"))) +
+  theme_pubr()
+
+
 
 stand_w_prcp <- filter_w_stand %>%
   left_join(all_plant_prcp)
@@ -791,7 +842,8 @@ meta_input <- combined_filtered_results %>%
   dplyr::select(Year, State, Location, ExperimentName, SoySeedingDate.y, yield_gap, SE, plant_prcp) %>%
   rename("SoySeedingDate" = SoySeedingDate.y) %>%
   mutate(site_year = paste0(State, "-", Year)) %>%
-  distinct()
+  distinct() %>%
+  filter(site_year != "NY-2021")
 
 #meta_input <- left_join(meta_input, all_spring_gdd, by = c("Year", "State", "Location"))
 
@@ -939,14 +991,15 @@ metaplot <- ggplot(new_data_nlme, aes(x = plant_prcp, y = pred)) +
   geom_errorbar(data = metagen_result_final,
                 aes(x = plant_prcp, y = yield_ratio,
                     ymin = lowerci_trans, ymax = upperci_trans, colour = State), width = 0.2) +
+  geom_label(data = metagen_result_final, aes(x = plant_prcp, y = yield_ratio, label = site_year)) +
   annotate("text", x = 4, y=1.2, label = paste("R² =", round(pseudo_r2,3)), size = 5) +
   labs(x = "Precipitation +/- 15 days of planting (cm)", 
        y = "Ratio of no-till to tilled yield",
        color = "") +
   theme_pubr() +
   geom_line(data = new_data_nlme, aes(x = plant_prcp, y = predicted), color = "blue", size = 1, linetype = "dashed") +
-  geom_smooth(method = "lm", formula = y ~ x
-              ,data = metagen_result_final, aes(x = plant_prcp, y = yield_ratio)) +
+  #geom_smooth(method = "lm", formula = y ~ x
+   #           ,data = metagen_result_final, aes(x = plant_prcp, y = yield_ratio)) +
   scale_color_manual(values = c("black", "red")) +
   theme(axis.text = element_text(size = 14),
         axis.title = element_text(size = 14),
@@ -975,7 +1028,7 @@ nlme_fit <- nlme(yield_ratio ~ L + (U - L) / (1 + exp(-k * (plant_prcp - x0))),
            data = group_data,
            start = c(L = 0.5, U = 1.1, k = 0.7, x0 = 8),
            fixed = L + U + k + x0 ~ 1,
-           random = U ~ 1 |State,
+           random = x0 ~ 1 |State,
            method = "ML")
 
 plot(augPred(nlme_fit))
@@ -1106,9 +1159,7 @@ apsim_nt <- apsim_update %>%
 
 
 proj_yields <- combined_filtered_results %>%
-  filter(State == "NY") %>%
-  distinct(Year, Till_NT, Yield_Mgha) %>%
-  group_by(Year, Till_NT) %>%
+  group_by(State, Year, Till_NT) %>%
   summarise(mean_yld = 1000*mean(Yield_Mgha))
 
 proj_nt <- proj_yields %>%
@@ -1145,11 +1196,11 @@ apsim_rye_upd %>%
 
 
 rye_obs <- comb_soy_prcp %>%
-  filter(State == "NY") %>%
-  group_by(Year) %>%
+  filter(State == "NY" | State == "WI") %>%
+  group_by(Year, State) %>%
   summarise(final_rye = mean(RyeBiomass_kgha, na.rm = T)) %>%
   mutate(type = rep("obs")) %>%
-  filter(Year != 2017)
+  filter(Year != 2017 & Year != 2020 & Year != 2024)
 
 
 apsim_preds <- apsim_rye_upd %>%
@@ -1279,483 +1330,18 @@ compare_met <- compare_met %>%
 
 
 compare_met %>%
-  ggplot(aes(x = cum_newa_prcp, y = cum_prism_prcp)) +
+  ggplot(aes(x = prcp_newa, y = prcp_cm)) +
   geom_point() +
   geom_abline(slope = 1) +
   stat_poly_eq(formula = y~x, use_label(c("R2", "eq")), size = 5) +
   theme_pubr()
 
-cor(compare_met$cum_newa_prcp, compare_met$cum_prism_prcp)^2
+cor(compare_met$prcp_newa, compare_met$prcp_cm)^2
 
 
 nse_top <- sum((compare_met$cum_prism_prcp-compare_met$cum_newa_prcp)^2)
 nse_bot <- sum((compare_met$cum_newa_prcp-mean(compare_met$cum_newa_prcp))^2)
 nse <- 1-(nse_top/nse_bot)
-```
-
-```{r Solar radiation Data}
-library(daymetr)
-library(nasapower)
-
-# Example: Daily data for 2022
-mus_srad <- download_daymet(
-  lat = 42.734, 
-  lon = -76.657,
-  start = 1982,
-  end = 2024,
-  internal = TRUE
-)
-
-mus_srad_df <- clean_names(mus_srad$data) %>%
-  mutate(Location = rep("Musgrave"))
-
-soy_daymet <- soy_rye_useful %>%
-  mutate(year = Year)
-
-daymet_prcp <- function(met_df, mgmt_df, station_site){
-
-  # met_df: Dataframe that includes precipitation data, year, and date at least to calculate precipitation around planting.
-  # mgmt_df: Dataframe that includes soybean management and agronomic information, including planting date
-  # station_site: String input for the name of experimental site (Musgrave, Arlington, Geneva, PSU, etc.)
-
-# Find planting dates for the location for each experiment and year
-  planting_dates <- mgmt_df %>%
-    group_by(year, Location) %>%
-    slice_min(SoySeedingDate)%>%
-    ungroup() %>%
-    filter(Location == station_site) %>%
-    dplyr::select(ExperimentName, year, State, Location, SoySeedingDate) %>%
-    distinct()
-  
-  exp_df <- left_join(met_df, planting_dates, by = c("year","Location")) %>%
-    mutate(plant_doy = yday(SoySeedingDate))
-#### Calculates the precipitation +/- 15 days around planting period for each planting date at the site 
-  plant_prcp <- exp_df %>%
-    filter(!is.na(SoySeedingDate) & yday >= plant_doy - 15 & yday<= plant_doy + 15) %>%
-    group_by(ExperimentName, year, State, Location, SoySeedingDate) %>%
-    summarise(plant_prcp = sum(prcp_mm_day, na.rm = T)/10, .groups = "drop")
-  return(plant_prcp)
-}
-daymet_plant_prcp <- daymet_prcp(met_df = mus_srad_df, mgmt_df = soy_daymet, station_site = "Musgrave")
-
-prism_comparison <- musgrave_plant_prcp %>%
-  filter(Year < 2024)
-
-climod_comp <- c(6.95,2.89,6.39,2.23,1.35,4.46)*2.54
-
-cor(daymet_plant_prcp$plant_prcp, prism_comparison$plant_prcp)^2
-cor(daymet_plant_prcp$plant_prcp, climod_comp)^2
-cor(prism_comparison$plant_prcp, climod_comp)^2
-
-#### Checking some climod data to see if it is better
-
-climod_data <- read_csv("~/Downloads/musgrave_climod_check.csv")
-filter_chars <- c("T", "M", "S", "A")
-
-climod_data$Precipitation <- gsub("A","",musgrave_weather$Precipitation)
-
-climod_missing <- climod_data %>%
-  filter(Precipitation == "M")
-
-climod_clean <- climod_data %>% 
-  mutate(Precipitation = na_if(Precipitation, "T")) %>%
-  mutate(Precipitation = na_if(Precipitation, "S")) %>%
-  mutate(Precipitation = na_if(Precipitation, "M")) %>%
-  mutate(Precipitation = as.numeric(Precipitation)) %>%
-  mutate(Precipitation = replace_na(Precipitation,0)) %>%
-  mutate(Date = as.Date(Date, format = "%m/%d/%y")) %>%
-  mutate(day_of_year = yday(Date)) %>%
-  mutate(Year = year(Date)) %>%
-  mutate(month = month(Date)) 
-
-climod_metric <- climod_clean %>%
-  mutate(date = Date,
-         year = Year,
-         yday = day_of_year,
-         prcp_cm = Precipitation*2.54) %>%
-  dplyr::select(date, year, yday,, prcp_cm) %>%
-  mutate(Location = rep("Musgrave"))
-
-climod_prcp <- function(met_df, mgmt_df, station_site){
-
-  # met_df: Dataframe that includes precipitation data, year, and date at least to calculate precipitation around planting.
-  # mgmt_df: Dataframe that includes soybean management and agronomic information, including planting date
-  # station_site: String input for the name of experimental site (Musgrave, Arlington, Geneva, PSU, etc.)
-
-# Find planting dates for the location for each experiment and year
-  planting_dates <- mgmt_df %>%
-    group_by(year, Location) %>%
-    slice_min(SoySeedingDate)%>%
-    ungroup() %>%
-    filter(Location == station_site) %>%
-    dplyr::select(ExperimentName, year, State, Location, SoySeedingDate) %>%
-    distinct()
-  
-  exp_df <- left_join(met_df, planting_dates, by = c("year","Location")) %>%
-    mutate(plant_doy = yday(SoySeedingDate))
-#### Calculates the precipitation +/- 15 days around planting period for each planting date at the site 
-  plant_prcp <- exp_df %>%
-    filter(!is.na(SoySeedingDate) & yday >= plant_doy - 15 & yday<= plant_doy + 15) %>%
-    group_by(ExperimentName, year, State, Location, SoySeedingDate) %>%
-    summarise(plant_prcp = sum(prcp_cm, na.rm = T), .groups = "drop")
-  return(plant_prcp)
-}
-
-climod_plant_prcp <- climod_prcp(climod_metric, soy_daymet, "Musgrave") 
-climod_no2016 <- climod_plant_prcp %>%
-  filter(year != 2016,
-         year != 2024)
-mus_pcp_no2016 <- musgrave_plant_prcp %>%
-  filter(Year != 2016) 
-
-cor(climod_no2016$plant_prcp , mus_pcp_no2016$plant_prcp)^2
-
-sqrt(1/nrow(climod_no2016)*sum((mus_pcp_no2016$plant_prcp-climod_no2016$plant_prcp)^2))
-mean(climod_no2016$plant_prcp)
-
-
-#### Looking at soil water balance to find deficit at planting
-
-lat_mus <- 42.734
-lon_mus <- -76.657    
-start_date <- "1981-01-01"
-end_date <- "2024-12-31"
-
-# Get daily data for a single point
-power_data <- get_power(
-  community = "AG",         # Agricultural data
-  lonlat = c(lon_mus, lat_mus),
-  pars = c("ALLSKY_SFC_SW_DWN"),  
-  dates = c(start_date, end_date)
-)
-power_clean <- power_data %>%
-  drop_na() %>%
-  mutate(date = YYYYMMDD,
-         rad_n = ALLSKY_SFC_SW_DWN) %>%
-  dplyr::select(date, rad_n)
-
-
-calc_pt_et <- function(tmin, tmax, rs, albedo = 0.23, alpha = 1.26, lambda = 2.45, gamma = 0.0665) {
-  
-  # Mean temperature
-  tmean <- (tmin + tmax) / 2
-  
-  # Saturation vapor pressure (kPa)
-  es <- 0.6108 * exp((17.27 * tmean) / (tmean + 237.3))
-  
-  # Slope of saturation vapor pressure curve (Δ, in kPa/°C)
-  delta <- (4098 * es) / ((tmean + 237.3)^2)
-  
-  # Net radiation (Rn) approximation (MJ/m²/day)
-  rn <- (1 - albedo) * rs
-  
-  # Priestley-Taylor ET₀ (mm/day)
-  eto <- alpha * (delta / (delta + gamma)) * rn / lambda
-  
-  return(eto)
-}
-
-prism_power <- left_join(musgrave_prism,power_clean) %>%
-  drop_na() %>%
-  mutate(aw_cm = rep(NA),
-         excess_cm = rep(NA),
-         pet_cm = calc_pt_et(tmin = mint_c, tmax = maxt_c, rs = rad_n)/10)
-
-awc <- 0.15
-depth <- 30
-wp <- 0.12
-wp_cm <- wp*depth
-
-awc_cm <- awc*depth
-prism_power$aw_cm[1] <- awc_cm
-
-
-for(i in 2:nrow(prism_power)){
-  pet <- prism_power$pet_cm[i]
-  precip <- prism_power$prcp_cm[i]
-  pet_n_cm <- pet - precip
-  aw_prev <- prism_power$aw_cm[i-1]
-  
-  if(pet_n_cm == 0){
-    aw <- aw_prev
-  } else if (pet_n_cm > 0){
-    aw <- aw_prev*exp(-pet/awc_cm)
-  } else if (pet_n_cm < 0 && (aw_prev-pet_n_cm) <= awc_cm){
-    aw <- aw_prev-pet_n_cm
-  } else{
-    aw <- awc_cm
-  }
-  prism_power$aw_cm[i] <- aw
-}
-
-prism_power_all <- prism_power %>%
-  mutate(pet_n_cm = pet_cm - prcp_cm,
-         excess_cm = case_when(pet_n_cm < 0 & dplyr::lag(aw_cm)-pet_n_cm > awc_cm ~ lag(aw_cm)-pet_n_cm-awc_cm,
-                               .default = 0),
-         et = pet_cm*(aw_cm/awc_cm),
-         swd_cm = aw_cm-(0.12*depth)
-  )
-
-prism_power_all <- prism_power %>%
-  mutate(
-    doy = yday(date),
-    kc = case_when(
-      doy <= 90 ~ 0.4,
-      doy <= 120 ~ 0.4 + (doy - 90) * (0.4 / 30) ,   # Apr 1–Apr 30: linear 0.4 to 0.8
-      doy <= 150 ~ 0.8 + (doy - 120) * (0.2 / 30),  # May 1–May 30: 0.8 to 1.0
-      doy <= 160 ~ 1.0 - (doy - 150) * (0.6 / 10),  # June 1–June 10: senescence
-      TRUE ~ 0.4  # after termination or mowing
-    ),
-    aet_cm = pet_cm * kc  # or et0_cm if using that
-  )
-
-
- ### gpt
-for(i in 2:nrow(prism_power_all)){
-  pet <- prism_power_all$pet_cm[i]
-  precip <- prism_power_all$prcp_cm[i]
-  net_pet <- pet - precip
-  aw_prev <- prism_power_all$aw_cm[i - 1]
-  
-  if (net_pet > 0) {
-    aw <- max(aw_prev - net_pet, 0)
-  } else {
-    aw <- min(aw_prev - net_pet, awc_cm)
-  }
-  
-  prism_power_all$aw_cm[i] <- aw
-}
-
-prism_power_all <- prism_power_all %>%
-  mutate(
-    net_pet_cm = pet_cm - prcp_cm,
-    et_cm = pet_cm * (aw_cm / awc_cm),
-    swd_cm = pmin(aw_cm - (0.12*depth),0),
-    excess_cm = pmax(0, aw_cm + prcp_cm - pet_cm - awc_cm)
-  )
-
-
-
-### GPT approach for each year as independent
-planting_dates_df <- musgrave_plant_prcp %>%
-  dplyr::select(ExperimentName, SoySeedingDate, Year)
-
-prism_power_all <- prism_power_all %>%
-  mutate(
-    Year = year(date),
-    doy = yday(date)
-  ) %>%
-  filter(Year %in% planting_dates_df$Year) %>%
-  left_join(
-    planting_dates_df %>%
-      mutate(planting_doy = yday(SoySeedingDate)),
-    by = "Year"
-  )
-
-soil_balance_by_year <- list()
-
-# Set constants
-depth <- 30        # cm
-awc <- 0.15        # cm/cm
-awc_cm <- awc * depth
-wp <- 0.12         # wilting point (cm/cm)
-wp_cm <- wp * depth
-
-# Initialize result list
-soil_balance_by_year <- list()
-
-# Loop over years
-for(yr in unique(prism_power_all$Year)) {
-  yearly_data <- prism_power_all %>%
-    filter(Year == yr, doy <= planting_doy+15) %>%
-    arrange(date)
-  
-  n_days <- nrow(yearly_data)
-  aw_vector <- numeric(n_days)
-  aw_vector[1] <- awc_cm  
-
-  for(i in 2:n_days){
-    stress <- max((aw_vector[i - 1] / awc_cm), 0.1)^0.5
-    
-    aet <- yearly_data$aet_cm[i]*stress
-    precip <- yearly_data$prcp_cm[i]
-    net <- aet - precip
-    aw_prev <- aw_vector[i-1]
-    
-    aw <- max(min(aw_prev - net, awc_cm), 0)  # constrain to [WP, AWC]
-    aw_vector[i] <- aw
-  }
-  
-  # Add results to the data frame
-  yearly_data$aw_cm <- aw_vector
-  yearly_data$swd_cm <- aw_vector - wp_cm  
-  
-  soil_balance_by_year[[as.character(yr)]] <- yearly_data
-}
-
-# Combine all years
-final_soil_balance <- bind_rows(soil_balance_by_year)
-
-final_soil_balance %>%
-  mutate(exp_year = paste0(ExperimentName,"-",Year)) %>%
-  ggplot(aes(x = date, y = swd_cm)) +
-  facet_wrap(~exp_year, scales = "free_x") +
-  geom_point() +
-  geom_line() +
-  geom_vline(aes(xintercept = SoySeedingDate), color = "red") +
-  theme_pubr()
-
-
-swd_at_plant <- final_soil_balance %>%
-  group_by(Year) %>%
-  summarise(swd_plant = mean(swd_cm[doy >= planting_doy-15 & doy <= planting_doy+15])) %>%
-  mutate(State = rep("NY"))
-
-mus_ratios$Year <- year(mus_ratios$SoySeedingDate)
-
-swd_mus <- left_join(mus_ratios, swd_at_plant) %>%
-  filter(Year < 2024)
-
-cor(swd_mus$yield_ratio, swd_mus$plant_prcp)^2
-
-swd_mus %>%
-  ggplot(aes(x = swd_plant, y = yield_ratio)) +
-  geom_point() +
-  theme_pubr() +
-  stat_poly_eq()
-
-### Everything for Wisconsin 
-
-lat_arl <- 43.30294
-lon_arl <- -89.34670   
-start_date <- "1981-01-01"
-end_date <- "2024-12-31"
-
-# Get daily data for a single point
-power_data_wi <- get_power(
-  community = "AG",         
-  lonlat = c(lon_arl, lat_arl),
-  pars = c("ALLSKY_SFC_SW_DWN"),  
-  dates = c(start_date, end_date)
-)
-
-power_clean_wi <- power_data_wi %>%
-  drop_na() %>%
-  mutate(date = YYYYMMDD,
-         rad_n = ALLSKY_SFC_SW_DWN) %>%
-  dplyr::select(date, rad_n)
-
-prism_power_wi <- left_join(arlington_prism,power_clean_wi) %>%
-  drop_na() %>%
-  mutate(aw_cm = rep(NA),
-         excess_cm = rep(NA),
-         pet_cm = calc_pt_et(tmin = mint_c, tmax = maxt_c, rs = rad_n)/10)
-
-planting_dates_df_wi <- wi_plant_prcp %>%
-  dplyr::select(ExperimentName, SoySeedingDate, Year)
-
-prism_power_all_wi <- prism_power_wi %>%
-  mutate(
-    doy = yday(date),
-    kc = case_when(
-      doy <= 90 ~ 0.4,
-      doy <= 120 ~ 0.4 + (doy - 90) * (0.4 / 30) ,   # Apr 1–Apr 30: linear 0.4 to 0.8
-      doy <= 150 ~ 0.8 + (doy - 120) * (0.2 / 30),  # May 1–May 30: 0.8 to 1.0
-      doy <= 160 ~ 1.0 - (doy - 150) * (0.6 / 10),  # June 1–June 10: senescence
-      TRUE ~ 0.4  # after termination or mowing
-    ),
-    aet_cm = pet_cm * kc  # or et0_cm if using that
-  )
-
-prism_power_all_wi <- prism_power_all_wi %>%
-  mutate(
-    Year = year(date),
-    doy = yday(date)
-  ) %>%
-  filter(Year %in% planting_dates_df_wi$Year) %>%
-  left_join(
-    planting_dates_df_wi %>%
-      mutate(planting_doy = yday(SoySeedingDate)),
-    by = "Year"
-  )
-
-soil_balance_by_year <- list()
-
-# Set constants
-depth <- 30        # cm
-awc_wi <- 0.23       # cm/cm
-awc_cm_wi <- awc_wi * depth
-wp_wi <- 0.153         # wilting point (cm/cm)
-wp_cm_wi <- wp_wi * depth
-
-# Initialize result list
-soil_balance_by_year_wi <- list()
-
-# Loop over years
-for(yr in unique(prism_power_all_wi$Year)) {
-  yearly_data <- prism_power_all_wi %>%
-    filter(Year == yr, doy <= planting_doy+15) %>%
-    arrange(date)
-  
-  n_days <- nrow(yearly_data)
-  aw_vector <- numeric(n_days)
-  aw_vector[1] <- awc_cm_wi  
-
-  for(i in 2:n_days){
-    stress <- max((aw_vector[i - 1] / awc_cm_wi), 0.1)^0.5
-    
-    aet <- yearly_data$aet_cm[i]*stress
-    precip <- yearly_data$prcp_cm[i]
-    net <- aet - precip
-    aw_prev <- aw_vector[i-1]
-    
-    aw <- max(min(aw_prev - net, awc_cm_wi), 0)  # constrain to [WP, AWC]
-    aw_vector[i] <- aw
-  }
-  
-  # Add results to the data frame
-  yearly_data$aw_cm <- aw_vector
-  yearly_data$swd_cm <- aw_vector - wp_cm_wi  
-  
-  soil_balance_by_year_wi[[as.character(yr)]] <- yearly_data
-}
-
-# Combine all years
-final_soil_balance_wi <- bind_rows(soil_balance_by_year_wi)
-
-final_soil_balance_wi %>%
-  mutate(exp_year = paste0(ExperimentName,"-",Year)) %>%
-  ggplot(aes(x = date, y = swd_cm)) +
-  facet_wrap(~exp_year, scales = "free_x") +
-  geom_point() +
-  geom_line() +
-  geom_vline(aes(xintercept = SoySeedingDate), color = "red") +
-  theme_pubr()
-
-
-swd_at_plant_wi <- final_soil_balance_wi %>%
-  group_by(Year) %>%
-  summarise(swd_plant = mean(swd_cm[doy >= planting_doy-15 & doy <= planting_doy+15])) %>%
-  mutate(State = rep("WI"))
-
-
-swd_ny_wi <- rbind(swd_at_plant, swd_at_plant_wi) 
-
-all_ratios <- metagen_result_final_1 %>%
-  dplyr::select(State, Year, ExperimentName, yield_ratio)
-
-
-swd_ratio_all <- left_join(swd_ny_wi, all_ratios)
-
-swd_ratio_all %>%
-  filter(ExperimentName != "Mowtivation") %>%
-  ggplot(aes(x = swd_plant, y = yield_ratio)) +
-  geom_point(aes(color = State)) +
-  geom_text(aes(label = paste0(ExperimentName," ", Year))) +
-  stat_poly_eq() +
-  theme_pubr()
-#### Although this looks cool, I think there are too many assumptions being made, especially in the period post soybean planting. Therefore it may be more straightforward to stick with precipitation and let the soil water balance stuff rest for now. 
-
 ```
 
 ```{r Soybean ANCOVA}
@@ -2000,99 +1586,6 @@ return_curves_df_wi %>%
   geom_hline(yintercept = 13.53, color = "red") #### This plot hints that Wisconsin frequently gets more sufficient rain for this system to work at getting 90% of Till yield in NT
 ```
 
-```{r Conditional Inference Tree}
-library(partykit)
-library(ggparty)
-
-soybean_precip <- soy_rye_std %>%
-  left_join(all_plant_prcp, by = c("Year", "State")) %>%
-  mutate(pdoy = yday(as.Date(SoySeedingDate.x, format = "%m/%d/%y")),
-         WeedBiomass_kgha = as.numeric(WeedBiomass_kgha),
-         Till_NT = as.factor(Till_NT),
-         State = as.factor(State),
-         exp_treat = as.factor(ExperimentalTrt)) %>% 
-  filter(Year < 2024) %>%
-  dplyr::select(Year,State, Till_NT, Yield_Mgha, plant_prcp, WeedBiomass_kgha, pdoy) %>%
-  mutate(year_fac = as.factor(Year)) %>%
-  drop_na()
-
-control = ctree_control(mincriterion = 1-(.05*ncol(soybean_precip)-1))
-
-cit_soy <- ctree(Yield_Mgha ~ as.factor(State) + Till_NT + plant_prcp, data = ancova_data)
-
-pred_soy <- predict(cit_soy)
-obs_soy <- ancova_data$Yield_Mgha
-
-rmse <- sqrt(mean((obs_soy - pred_soy)^2))
-
-ss_res <- sum((obs_soy - pred_soy)^2)
-ss_tot <- sum((obs_soy - mean(obs_soy))^2)
-r2 <- 1 - (ss_res / ss_tot)
-
-nrmse <- rmse/mean(obs_soy)
-
-nse <- 1 - (sum((obs_soy - pred_soy)^2) / sum((obs_soy - mean(obs_soy))^2))
-
-plot(cit_soy)
-
-# extract p-values
-pvals <- unlist(nodeapply(cit_soy, ids = nodeids(cit_soy), function(n) info_node(n)$p.value))
-pvals <- pvals[pvals <.05]
-# plotting
-ggparty(cit_soy) +
-  geom_edge() +
-  geom_edge_label() +
-  geom_node_label(line_list = list(aes(label = splitvar),
-                                   aes(label = paste0("N=", nodesize, ", p", 
-                                                      ifelse(pvals < .001, "<.001", paste0("=", round(pvals, 3)))), 
-                                       size = 10)),
-                  line_gpar = list(list(size = 13), 
-                                   list(size = 10)), 
-                  ids = "inner") +
-  geom_node_label(aes(label = paste0("Node ", id, ", N = ", nodesize)),
-    ids = "terminal", nudge_y = -0.0, nudge_x = 0.01) +
-  geom_node_plot(gglist = list(
-    geom_bar(position = position_fill(), color = "black"),
-      theme_minimal(),
-      scale_fill_manual(values = c("gray50", "gray80"), guide = FALSE),
-      scale_y_continuous(breaks = c(0, 1)),
-    xlab(""), 
-    ylab("Mean soy yield (Mg/ha"),
-    shared_axis_labels = TRUE))
-
-ggparty(cit_soy) +
-  geom_edge() +
-  geom_edge_label() +
-  geom_node_splitvar(aes(label = splitvar),
-                     ids = "inner") +
-  geom_node_label(aes(label = info),
-                  ids = "terminal")
-
-
-soy_nt <- soy_rye_std %>%
-  mutate(SoySeedingDate = as.Date(SoySeedingDate, format = "%m/%d/%y")) %>%
-  left_join(all_plant_prcp) %>%
-  filter(Till_NT == "NT") %>%
-  mutate(pdoy = yday(SoySeedingDate),
-         WeedBiomass_kgha = as.numeric(WeedBiomass_kgha),
-         Till_NT = as.factor(Till_NT),
-         State = as.factor(State),
-         exp_treat = as.factor(ExperimentalTrt)) %>% 
-  filter(Year < 2024) %>%
-  dplyr::select(Year,State, Till_NT, Yield_Mgha, plant_prcp, RyeBiomass_kgha) %>%
-  mutate(year_fac = as.factor(Year)) %>%
-  drop_na()
-
-cit_nt <- ctree(Yield_Mgha ~ State + plant_prcp + RyeBiomass_kgha, data = soy_nt)
-plot(cit_nt)
-
-stand_w_prcp <- filter_w_stand %>%
-  left_join(all_plant_prcp)
-
-stand_tree <- ctree(Yield_Mgha ~ as.factor(Till_NT) + plant_prcp + Per_Emergence, data = stand_w_prcp)
-plot(stand_tree)
-```
-
 ```{r Saxton and Rawls Pedotransfer Function}
 #### Function to estimate field capacity (theta 33 kpa) and wilting point (theta 1500 kpa) from soil textural data. 
 #### Equations from Saxton and Rawls 2006 paper Soil Water Characteristic Estimates by Texture and Organic Matter for Hydrologic Solutions
@@ -2108,7 +1601,158 @@ sax_rawl_fc_wp <- function(sand, silt, clay, org_mat = 0.03){
   return(soil_wat_df)
 }
 
-sax_rawl_fc_wp(sand = 0.26, silt = 0.55, clay = 0.19, org_mat = 0.035)
+ocs_fc_wp <- sax_rawl_fc_wp(sand = 0.3959, silt = 0.4114, clay = 0.1927, org_mat = 0.03)
+
+B <- (log(1500)-log(33))/(log(ocs_fc_wp$theta_33)/log(ocs_fc_wp$theta_1500))
+A <- exp(log(33)+(B*log(ocs_fc_wp$theta_33)))
+
+psi_theta <-function(theta){
+  psi <- A*((theta)^-B)
+  psi_theta_df <- data.frame(theta,psi)
+  return(psi_theta_df)
+}
+
+thetas <- psi_theta(theta = seq(0.13,0.3,0.01))
+
+thetas %>%
+  ggplot(aes(x = theta*100, y = psi)) +
+  geom_line() +
+  geom_point() + 
+  theme_pubr() +
+  labs(x = "Water potential (kPa)", y = "Volumetric water content (%)") +
+  scale_y_log10()
+  
+  
+#### SWCON for APSIM #### 
+
+bd_mus <- c(1.290,1.330, 1.470, 1.470, 1.640, 1.700, 1.700)
+
+dul_mus <- c(0.250, 0.227, 0.200, 0.200, 0.163, 0.150, 0.150)
+
+po_mus <- 1-(bd_mus/2.65)
+
+swcon_mus <- (po_mus-dul_mus)/po_mus
+
+
+#### Van G ####
+library(soilDB)
+
+df_ocs <- data.frame(
+  sand = 39.59, silt = 41.14, clay = 19.27,
+  bulk_density = 1.3
+)
+
+df_aars <- data.frame(
+  sand = 16, silt = 64, clay = 20,
+  bulk_density = 0.153
+)
+
+van_pars <- ROSETTA(df_ocs, vars = names(df_ocs), v = "3", include.sd = T)
+
+van_aars <- ROSETTA(df_aars, vars = names(df_aars), v = "3", include.sd = T)
+
+theta_r <- van_aars$theta_r
+theta_s <- van_aars$theta_s
+alpha <- 10^van_aars$alpha
+n <- 10^van_aars$npar
+m <- 1 - (1/n)
+
+# Psi range
+psi_cm <- seq(1, 1500, 1)*10.197
+
+# Retention curve
+theta <- theta_r + (theta_s - theta_r) / ((1 + (alpha * psi_cm)^n)^m)
+
+theta_1500 <- data.frame(
+  psi = 1500,
+  theta_1500 = theta_r + (theta_s - theta_r) / ((1 + (alpha * 1500)^n)^m)
+)
+
+chat_df <- data.frame(psi_cm, theta)
+
+chat_df %>%
+  ggplot(aes(x = log10((psi_cm)/10.197), y = theta)) +
+  geom_line() +
+  #geom_point(data = theta_1500, aes(x = (psi) ,y = theta_1500)) +
+  theme_pubr() +
+  labs(x = "Water potential (log10(kPa))", y = "Volumetric water content") 
+  
+
+psi33_cm <- 33 * 10.197
+psi1500_cm <- 1500 * 10.197
+
+theta33 <- theta_r + (theta_s - theta_r) / ((1 + (alpha * psi33_cm)^n)^m)
+theta1500 <- theta_r + (theta_s - theta_r) / ((1 + (alpha * psi1500_cm)^n)^m)
+
+
+#### Monte Carlo Analysis Chat GPT
+
+set.seed(123)
+
+# Parameter means and sds from ROSETTA
+param_means <- c(theta_r = van_aars$theta_r, theta_s = van_aars$theta_s, alpha = 10^van_aars$alpha, n = 10^van_aars$npar)
+param_sds   <- c(theta_r = van_aars$sd_theta_r, theta_s = van_aars$sd_theta_s, alpha = 10^van_aars$sd_alpha, n = 10^van_aars$sd_npar)
+
+set.seed(1)
+n_sim <- 5000
+h <- exp(seq(log(1), log(16000), length.out = 150))  # cm suction (positive magnitude)
+
+# helper: truncated normal draw
+rtn <- function(n, mean, sd, low=-Inf, high=Inf) {
+  x <- rnorm(n, mean, sd)
+  x[x < low] <- low
+  x[x > high] <- high
+  x
+}
+
+# 1) sample on native scales
+th_r  <- rtn(n_sim, van_aars$theta_r,van_aars$sd_theta_r,low=0)
+th_s0 <- rtn(n_sim, van_aars$theta_s,van_aars$sd_theta_s,low=0)
+logA  <- rnorm(n_sim, van_aars$alpha, van_aars$sd_alpha)
+logN  <- rnorm(n_sim, van_aars$npar,  van_aars$sd_npar)
+
+# optional porosity cap if you know bulk density bd (g/cm3)
+# phi <- 1 - bd/2.65
+# th_s0 <- pmin(th_s0, phi)
+
+# enforce theta_s >= theta_r
+
+# back-transform strictly-positive params
+alpha <- 10^(logA)
+npar  <- pmax(10^(logN), 1 + 1e-6)
+m     <- 1 - 1/npar
+
+# 2) van Genuchten retention
+vg_theta <- function(h, thr, ths, a, n, m) {
+  thr + (ths - thr) / ((1 + (a * h)^n)^(m))
+}
+
+# 3) evaluate and get pointwise 95% bands
+library(matrixStats)
+H <- matrix(h, nrow=length(h), ncol=n_sim)
+Theta <- vg_theta(H, matrix(th_r,  nrow=length(h), ncol=n_sim, byrow=TRUE),
+                     matrix(th_s0,  nrow=length(h), ncol=n_sim, byrow=TRUE),
+                     matrix(alpha, nrow=length(h), ncol=n_sim, byrow=TRUE),
+                     matrix(npar,  nrow=length(h), ncol=n_sim, byrow=TRUE),
+                     matrix(m,     nrow=length(h), ncol=n_sim, byrow=TRUE))
+
+mean_curve <- rowMeans(Theta)
+lower <- rowQuantiles(Theta, probs=0.025)
+upper <- rowQuantiles(Theta, probs=0.975)
+
+
+
+# 4) quick ggplot
+library(ggplot2)
+df <- data.frame(h=h/10.197, mean=mean_curve, lower=lower, upper=upper)
+ggplot(df, aes(x=h)) +
+  geom_ribbon(aes(ymin=lower, ymax=upper), alpha=0.25) +
+  geom_line(aes(y=mean)) +
+  scale_x_log10() +
+  coord_cartesian(xlim = c(1, 2000)) +
+  labs(x="Pressure head (kPa)", y="θ (cm³/cm³)") +
+  theme_pubr()
+
 ```
 
 ```{r OCS Soil Moisture Data}
@@ -2137,6 +1781,1018 @@ ocs_vwc_upd %>%
   theme_pubr() +
   labs(linetype = "", colour = "", y = "Average Daily VWC (mm/mm)",
        x = "Day of June 2025")
+
+
+```
+
+```{r APSIM Yield Gaps and Water Deficit}
+library(readxl)
+apsim_yg_def <- read_xlsx("SoyGap_APSIM.xlsx")
+
+apsim_yg_yields <- apsim_yg_def %>%
+  group_by(Zone) %>%
+  summarise(yield_kg_ha = max(soy_kg_ha),
+            rye_bm_kg_ha = max(rye_bm_kg_ha)) %>%
+  filter(Zone != "Fallow Field", Zone != "Rye Field") %>%
+  separate_wider_delim(cols = Zone, delim = " ", names = c("State", "Tillage", "year_plant"))
+
+
+rye_ylds <- apsim_yg_yields %>%
+  filter(rye_bm_kg_ha > 0,
+         Tillage == "NT")
+
+apsim_gaps <- apsim_yg_yields %>%
+  separate_wider_delim(cols = Zone, delim = " ", names = c("State", "Tillage", "Year")) %>%
+  group_by(State, Year) %>%
+  summarise(yield_gap = yield_kg_ha[Tillage == "NT"]/yield_kg_ha[Tillage == "Till"])
+
+apsim_rye_vals <- apsim_yg_yields %>%
+  separate_wider_delim(cols = Zone, delim = " ", names = c("State", "Tillage", "Year")) %>%
+  filter(Tillage == "NT") %>%
+  group_by(State, Year) %>%
+  summarise(rye_bm_kg_ha = rye_bm_kg_ha)
+
+plant_dates <- meta_input %>%
+  filter(State != "PA") %>%
+  dplyr::select(State,SoySeedingDate, site_year) %>%
+  distinct()
+
+planting <- soy_rye_useful %>%
+  dplyr::select(SoySeedingDate) %>%
+  distinct()
+
+apsim_dates <- apsim_yg_def %>%
+  mutate(date = as.Date(Clock.Today)) %>%
+  dplyr::select(date)
+
+apsim_defs_nt <- apsim_yg_def %>%
+  mutate(date = as.Date(Clock.Today)) %>%
+  #filter(rye_bm_kg_ha %in% rye_ylds$rye_bm_kg_ha) %>%
+  dplyr::select(Zone,SoilWaterDeficit) %>%
+  separate_wider_delim(cols = Zone, delim = " ", names = c("State", "Tillage", "year_plant"))
+
+
+apsim_defs_nt <- apsim_defs_nt[-12,] #### Taking out the second WI 2021b
+
+apsim_defs_till <- apsim_yg_def %>%
+  filter(as.Date(Clock.Today) %in% plant_dates$SoySeedingDate,
+         grepl("Till", Zone)) %>%
+  dplyr::select(Zone,SoilWaterDeficit, Clock.Today) %>%
+  separate_wider_delim(cols = Zone, delim = " ", names = c("State", "Tillage", "year_plant")) %>%
+  mutate(site_year = paste0(State, "-", year_plant)) %>%
+  mutate(year_sim = as.character(year(Clock.Today))) %>%
+  group_by(site_year) %>%
+  filter(year_sim == year_plant) %>%
+  slice_min(Clock.Today) %>%
+  ungroup() %>%
+  dplyr::select(State, Tillage, year_plant, SoilWaterDeficit)
+
+apsim_till_2021 <- apsim_yg_def %>%
+  filter(as.Date(Clock.Today) %in% plant_dates$SoySeedingDate,
+         grepl("Till", Zone)) %>%
+  dplyr::select(Zone,SoilWaterDeficit, Clock.Today) %>%
+  separate_wider_delim(cols = Zone, delim = " ", names = c("State", "Tillage", "year_plant")) %>%
+  mutate(site_year = paste0(State, "-", year_plant)) %>%
+  mutate(year_sim = as.character(year(Clock.Today))) %>%
+  filter(year_sim %in% "2021") %>%
+  filter((year_plant == "2021a" & Clock.Today == as.Date("2021-06-02")) | 
+         (year_plant == "2021b" & Clock.Today == as.Date("2021-06-04")))  %>%
+  dplyr::select(State, Tillage, year_plant, SoilWaterDeficit)
+
+apsim_defs_all <- rbind(apsim_defs_till, apsim_till_2021, apsim_defs_nt)
+
+fin_ap_df <- right_join(apsim_yg_yields, apsim_defs_all)
+
+
+fin_ap_df %>%
+  ggplot(aes(x = SoilWaterDeficit, y = yield_kg_ha, color = Tillage)) +
+  geom_point(aes(shape = State)) +
+  theme_pubr()
+
+gap_ap <- fin_ap_df %>%
+  group_by(State, year_plant) %>%
+  summarise(yield_gap = yield_kg_ha[Tillage == "NT"]/yield_kg_ha[Tillage == "Till"],
+         sw_diff = abs(SoilWaterDeficit[Tillage == "NT"])-abs(SoilWaterDeficit[Tillage == "Till"]))
+
+gap_ap %>%
+  ggplot(aes(x = sw_diff, y = yield_gap, colour = State)) +
+  geom_point() +
+  theme_pubr() +
+  labs(y = "Ratio of no-till to till yield", x = "No-till minus till soil water deficit", color = "")
+
+cor(gap_ap$sw_diff, gap_ap$yield_gap)^2
+
+obs_yg <- metagen_result_final %>%
+  dplyr::select(State, Year, yield_ratio) %>%
+  mutate(year_plant = as.character(Year))
+
+
+
+obs_pred <- left_join(obs_yg, gap_ap) %>%
+  drop_na()
+
+cor(obs_pred$yield_ratio, obs_pred$sw_diff)^2
+
+
+
+rmse_gap <- Metrics::rmse(obs_pred$yield_gap, obs_pred$yield_ratio)
+mean_gap_obs <- mean(obs_pred$yield_ratio)
+r_rmse <- round((rmse_gap/mean_gap_obs)*100,2)
+
+ny_obs_pred <- obs_pred %>%
+  filter(State == "NY")
+
+NSE <- function(obs, pred) {
+  1 - sum((obs - pred)^2) / sum((obs - mean(obs))^2)
+}
+
+NSE(obs = ny_obs_pred$yield_ratio, pred = ny_obs_pred$yield_gap)
+
+
+cor(ny_obs_pred$yield_gap, ny_obs_pred$sw_diff)^2
+
+rye_preds <- apsim_yg_yields %>%
+  filter(Tillage == "NT",
+         year_plant != "2021a")
+
+rye_preds$year_plant[rye_preds$year_plant == "2021b"] <- "2021"
+rye_preds$Year <- as.numeric(rye_preds$year_plant)
+
+NSE(obs = rye_obs$final_rye, pred = rye_preds$rye_bm_kg_ha)
+
+cor(rye_obs$final_rye, rye_preds$rye_bm_kg_ha)^2
+
+#### APSIM Yield gaps with plant population set to plant density (stand count instead of seeding rate)
+
+apsim_yg_def_adj <- read_xlsx("soygap_analysis_no_mc.xlsx")
+
+apsim_defs_adj <- apsim_yg_def_adj %>%
+  mutate(date = as.Date(Clock.Today)) %>%
+  dplyr::select(Zone, date,frac_water) %>%
+  separate_wider_delim(cols = Zone, delim = " ", names = c("State", "Tillage", "year_plant", "soil_scenario", "plant_scenario")) %>%
+  mutate(site_year = paste0(State,"-",year_plant))
+
+pd_filtered <- plant_dates %>%
+  filter(site_year %in% c("WI-2015", "WI-2017", "WI-2018", "WI-2019", "WI-2023",
+                          "NY-2015","NY-2016","NY-2023", "NY-2024"))
+
+df_filtered <- apsim_defs_adj %>%
+  semi_join(pd_filtered, by = c("date" = "SoySeedingDate","site_year")) %>%
+  dplyr::select(State, Tillage, year_plant, soil_scenario, plant_scenario, frac_water)
+
+
+apsim_yg_yields_adj <- apsim_yg_def_adj %>%
+  group_by(Zone) %>%
+  summarise(yield_kg_ha = max(soy_kg_ha),
+            rye_bm_kg_ha = max(rye_bm_kg_ha)) %>%
+  #filter(Zone != "Fallow Field", Zone != "Rye Field") %>%
+  separate_wider_delim(cols = Zone, delim = " ", names = c("State", "Tillage", "year_plant", "soil_scenario", "plant_scenario")) %>%
+  mutate(soil_scenario = factor(soil_scenario, levels = c("Low", "Med", "High"))) %>%
+  left_join(df_filtered)
+
+rye_ylds <- apsim_yg_yields_adj %>%
+  filter(rye_bm_kg_ha > 0,
+         Tillage == "NT") %>%
+  dplyr::select(-yield_kg_ha) %>%
+  mutate(site_year = paste0(State, year_plant),
+         type = rep("sim"))  %>%
+  dplyr::select(site_year, State, rye_bm_kg_ha)
+  
+rye_obs_adj <- rye_obs %>%
+  ungroup() %>%
+  mutate(site_year = paste0(State, Year), 
+         rye_bm_kg_ha = final_rye) %>%
+  filter(site_year %in% rye_ylds$site_year) %>%
+  dplyr::select(site_year, State, rye_bm_kg_ha)
+
+
+apsim_gaps_adj <- apsim_yg_yields_adj %>%
+  group_by(State, year_plant, soil_scenario, plant_scenario) %>%
+  mutate(yield_gap = yield_kg_ha[Tillage == "NT"]/yield_kg_ha[Tillage == "Till"],
+         water_frac_dif = frac_water[Tillage == "NT"]-frac_water[Tillage == "Till"])
+
+obs_yg_adj <- obs_yg %>%
+  filter(year_plant %in% apsim_gaps_adj$year_plant)
+
+adj_gaps_joined <- left_join(apsim_gaps_adj, obs_yg_adj) %>%
+  mutate(Year = as.numeric(year_plant))
+
+proj_yields_adj <- proj_yields %>%
+  filter(Year %in% adj_gaps_joined$Year)
+
+adj_gaps_yields <- left_join(adj_gaps_joined, proj_yields, by = c("State", "Tillage" = "Till_NT", "Year")) %>%
+  group_by(soil_scenario, plant_scenario) %>%
+  mutate(rmse_gap = Metrics::rmse(yield_ratio, yield_gap),
+         rrmse_gap = rmse_gap/mean(yield_ratio),
+         rmse_yield = rmse(mean_yld, yield_kg_ha),
+         rrmse_yield = rmse_yield/mean(mean_yld),
+         ef_gap = mod_ef(pred = yield_gap, obs = yield_ratio),
+         ef_yield = mod_ef(pred = yield_kg_ha, obs = mean_yld),
+         soil_scenario = factor(soil_scenario, levels = c("High", "Med", "Low")))
+
+# Graph comparing yields
+rrmse_yield <- Metrics::rmse(actual = adj_gaps_yields$mean_yld, 
+                             predicted =adj_gaps_yields$yield_kg_ha)/mean(adj_gaps_yields$mean_yld)
+rmse_yield <- Metrics::rmse(actual = adj_gaps_yields$mean_yld, 
+                             predicted =adj_gaps_yields$yield_kg_ha)
+r2_yield <- cor(adj_gaps_yields$mean_yld, adj_gaps_yields$yield_kg_ha)^2
+
+adj_yields_plot <- adj_gaps_yields %>%
+  ggplot(aes(x = mean_yld, y = yield_kg_ha)) +
+  geom_point(size = 2, aes(colour = State)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_pubr() +
+  facet_grid(rows = vars(soil_scenario),cols = vars(plant_scenario)) +
+  scale_color_manual(values = c("red", "black")) +
+  coord_cartesian(ylim = c(800, 5000), xlim = c(800,5000)) +
+  labs(x = "Observed soybean yield (kg/ha)", y = "Simulated soybean yield (kg/ha)", color = "", shape = "") +
+  geom_smooth(method = "lm", se = F, color = "gray", linetype = "dashed") +
+  stat_poly_eq(size = 4) +
+  geom_text(aes(label = paste0("RMSE = ", round(rmse_yield,2)), x = 1200, y = 4300), size = 4,inherit.aes = F) +
+  geom_text(aes(label = paste0("RRMSE = ", round(rrmse_yield*100,2),"%"), x = 1200, y = 3800), size = 4,inherit.aes = F) +
+  geom_text(aes(label = paste0("EF = ", round(ef_yield,2)), x = 1200, y = 3300), size = 4, inherit.aes = F) +
+  theme(legend.text = element_text(size = 12),
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 14))
+
+ggsave(adj_yields_plot, filename = "Figures/yg_adj_yields_plot_no_mc.png",
+       dpi = 300, width = 12, height = 8, units = "in")
+# Graph comparing gaps
+rrmse_gap <- Metrics::rmse(actual = adj_gaps_yields$obs_gap, predicted = adj_gaps_yields$yield_gap)/mean(adj_gaps_yields$obs_gap)
+rmse_gap <- Metrics::rmse(actual = adj_gaps_yields$obs_gap, predicted = adj_gaps_yields$yield_gap)
+r2_gap <- cor(adj_gaps_yields$obs_gap, adj_gaps_yields$yield_gap)^2
+
+yg_sim_obs_plot <- adj_gaps_yields %>%
+  ggplot(aes(x = yield_ratio, y = yield_gap)) +
+  geom_point(size = 3, aes(colour = State)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_pubr() +
+  facet_grid(rows = vars(soil_scenario) , cols = vars(plant_scenario)) +
+  scale_color_manual(values = c("red", "black")) +
+  coord_cartesian(ylim = c(0.5, 1.2), xlim = c(0.5,1.2)) +
+  labs(x = "Observed soybean yield gap", y = "Simulated soybean yield gap", color = "", shape = "") +
+  theme(legend.text = element_text(size = 16),
+        axis.title = element_text(size = 16),
+        axis.text = element_text(size = 16)) +
+  geom_text(aes(label = paste0("RMSE = ", round(rmse_gap,2)), x = 0.56, y = 1.1), size = 4,inherit.aes = F) +
+  geom_text(aes(label = paste0("RRMSE = ", round(rrmse_gap*100,2),"%"), x = 0.56, y = 1.04), size = 4,inherit.aes = F) +
+  geom_text(aes(label = paste0("EF = ", round(ef_gap,2)), x = 0.56, y = 0.98), size = 4, inherit.aes = F) +
+  stat_poly_eq(label.x = 0.155, label.y = 0.85, size = 5) 
+
+ggsave(yg_sim_obs_plot, filename = "Figures/yg_sim_obs_plot.png",
+       dpi = 300, width = 9, height = 6, units = "in")
+
+### Yield per year 
+
+adj_wide <- adj_gaps_yields_mc %>%
+  dplyr::select(State, year_plant, Tillage, plant_scenario,soil_scenario, yield_kg_ha) %>%
+  group_by(State, year_plant, Tillage, plant_scenario) %>%
+  pivot_wider(names_from = soil_scenario, values_from = yield_kg_ha) %>%
+  ungroup() %>%
+  group_by(State, year_plant, plant_scenario) %>%
+  mutate(yld_diff_tillage = 100*(Med[Tillage == "NT"]-Med[Tillage == "Till"])/Med[Tillage == "Till"])
+
+labels_ppop <- c("PD" = "Crop density", "SR" = "Seeding rate")
+
+adj_wide %>%
+  ggplot(aes(x = year_plant, y = yld_diff_tillage, fill = plant_scenario)) +
+  geom_bar(stat = "identity", position = position_dodge(), width = 0.4, color = "black") +
+  geom_hline(yintercept = 0) +
+  scale_fill_manual(values = c("pink","lightblue"), labels = labels_ppop) +
+  facet_wrap(~State, scales = "free_x", nrow = 2) +
+  theme_pubr() +
+  labs(y = "Difference between no-till and till yield (%)", x = "Year", color = "", fill = "") +
+  theme(legend.text = element_text(size = 16),
+        axis.title = element_text(size = 16),
+        axis.text = element_text(size = 16)) 
+
+61.8*seq(0.25, 1, length.out = 5)
+
+sw_df_plano <- data.frame(dul = c(0.327, 0.327, 0.354, 0.319, 0.344, 0.362, 0.391, 0.306, 0.236, 0.218, 0.168,
+                               0.154, 0.162), 
+                       ll15 = c(0.115, 0.115, 0.140, 0.114, 0.148, 0.174, 0.200, 0.148, 0.113, 0.098, 0.074, 0.065, 0.072)) %>%
+  mutate(init_25 = dul - (0.75*(dul-ll15)),
+         init_50 = dul - (0.5*(dul-ll15)),
+         init_75 = dul - (0.25*(dul-ll15)))
+
+sw_df_lima <- data.frame(dul = c(0.280, 0.280, 0.279, 0.290, 0.252),
+                         ll15 = 0.120, 0.120, 0.132, 0.157, 0.110) %>%
+   mutate(init_25 = dul - (0.75*(dul-ll15)),
+         init_50 = dul - (0.5*(dul-ll15)),
+         init_75 = dul - (0.25*(dul-ll15)))
+                       
+
+
+adj_gaps_yields_mc %>%
+  ggplot(aes(x = year_plant, y = yield_gap, colour = soil_scenario)) +
+  geom_point(size = 2.5) +
+  scale_color_manual(values = c("blue","darkgreen", "red")) + 
+  facet_grid(cols = vars(plant_scenario), rows = vars(State), scales = "free_x") +
+  theme_pubr() +
+  labs(y = "Simulated soybean yield gap (NT:Till)", x = "Year", color = "")
+
+
+
+
+### Plot to look at water def and yield gap
+yg_water_def_plot <- adj_gaps_yields %>%
+  ggplot(aes(x = frac_water, y = yield_kg_ha)) +
+  geom_point(size = 3, aes(colour = State, shape = plant_scenario, alpha = soil_scenario)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_pubr() +
+  facet_grid(cols = vars(soil_scenario)) +
+  geom_smooth(method = "lm", se = F, formula = y ~ poly(x, 2)) +
+  scale_color_manual(values = c("red", "black")) +
+  labs(x = "FASW NT - FASW Till", y = "Simulated soybean yield gap (NT:Till)", color = "", shape = "") +
+  theme(legend.text = element_text(size = 16),
+        axis.title = element_text(size = 16),
+        axis.text = element_text(size = 16)) +
+  #annotate(geom = "text",label = paste0("RMSE = ", round(rmse_gap,2)), x = 0.6, y = 0.99, size = 5) +
+  #annotate(geom = "text",label = paste0("RRMSE = ", round(rrmse_gap*100,2),"%"), x = 0.6, y = 0.965, size = 5) +
+  stat_poly_eq(use_label("eq", "R2"),formula = y ~ poly(x,2)) 
+
+ggsave(yg_sim_obs_plot, filename = "Figures/yg_sim_obs_plot.png",
+       dpi = 300, width = 9, height = 6, units = "in")
+
+
+### Table for PAW for all soils
+
+paw_table <- expand_grid(soil_series = c("Plano", "Lima"),
+                        soil_scenario = c("Low", "Med", "High")) %>%
+  mutate(pawc_mm = case_when(
+    soil_series == "Plano" & soil_scenario == "Low" ~ 183.4,
+    soil_series == "Plano" & soil_scenario == "Med" ~ 383.6,
+    soil_series == "Plano" & soil_scenario == "High" ~ 567.1,
+    soil_series == "Lima" & soil_scenario == "Low" ~ 77.4,
+    soil_series == "Lima" & soil_scenario == "Med" ~ 125.4,
+    soil_series == "Lima" & soil_scenario == "High" ~ 171.2,
+  ), State = case_when(
+    soil_series == "Plano" ~ "WI",
+    soil_series == "Lima" ~ "NY"
+  ))
+
+adj_gaps_pawc <- adj_gaps_yields %>%
+  left_join(paw_table, by = c("State", "soil_scenario")) %>%
+  group_by(State, year_plant, soil_scenario, plant_scenario) %>%
+  mutate(pawc_frac = pawc_mm*frac_water,
+         pawc_diff = pawc_frac[Tillage == "Till"]-pawc_frac[Tillage == "NT"],
+         pawc_frac_diff = pawc_diff/pawc_mm)
+
+
+adj_gaps_pawc %>%
+  ggplot(aes(x = -pawc_frac_diff, y = yield_gap)) +
+  geom_point(size = 3, aes(colour = State)) +
+ # geom_abline(slope = 1, intercept = 0) +
+  theme_pubr() +
+  facet_grid(rows = vars(plant_scenario),cols = vars(soil_scenario)) +
+  scale_color_manual(values = c("red", "black")) +
+  labs(x = "Till - NT PAW", y = "Simulated soybean yield gap (NT:Till)", color = "", shape = "") +
+  stat_poly_line(se = F) +
+  theme(legend.text = element_text(size = 16),
+        axis.title = element_text(size = 16),
+        axis.text = element_text(size = 16)) +
+  #annotate(geom = "text",label = paste0("RMSE = ", round(rmse_gap,2)), x = 0.6, y = 0.99, size = 5) +
+  #annotate(geom = "text",label = paste0("RRMSE = ", round(rrmse_gap*100,2),"%"), x = 0.6, y = 0.965, size = 5) +
+  stat_poly_eq(use_label("eq", "R2")) 
+
+
+#### The same as above, but for soils with discrete MC draws
+
+
+apsim_yg_def_mc <- read_xlsx("soygap_analysis_proj.xlsx")
+
+apsim_defs_adj_mc <- apsim_yg_def_mc %>%
+  mutate(date = as.Date(Clock.Today)) %>%
+  dplyr::select(Zone, date,frac_water) %>%
+  separate_wider_delim(cols = Zone, delim = " ", names = c("State", "Tillage", "year_plant", "soil_scenario", "plant_scenario")) %>%
+  mutate(site_year = paste0(State,"-",year_plant))
+
+df_filtered_mc <- apsim_defs_adj_mc %>%
+  semi_join(pd_filtered, by = c("date" = "SoySeedingDate","site_year")) %>%
+  dplyr::select(State, Tillage, year_plant, soil_scenario, plant_scenario, frac_water)
+
+
+apsim_yg_yields_adj_mc <- apsim_yg_def_mc %>%
+  group_by(Zone) %>%
+  summarise(yield_kg_ha = max(soy_kg_ha),
+            rye_bm_kg_ha = max(rye_bm_kg_ha)) %>%
+  #filter(Zone != "Fallow Field", Zone != "Rye Field") %>%
+  separate_wider_delim(cols = Zone, delim = " ", names = c("State", "Tillage", "year_plant", "soil_scenario", "plant_scenario")) %>%
+  mutate(soil_scenario = factor(soil_scenario, levels = c("Low", "Med", "High"))) %>%
+  left_join(df_filtered)
+
+rye_ylds <- apsim_yg_yields_adj_mc %>%
+  filter(rye_bm_kg_ha > 0,
+         Tillage == "NT") %>%
+  dplyr::select(-yield_kg_ha) %>%
+  mutate(site_year = paste0(State, year_plant),
+         type = rep("sim"))  %>%
+  dplyr::select(site_year, State, rye_bm_kg_ha)
+  
+rye_obs_adj <- rye_obs %>%
+  ungroup() %>%
+  mutate(site_year = paste0(State, Year), 
+         rye_bm_kg_ha = final_rye) %>%
+  filter(site_year %in% rye_ylds$site_year) %>%
+  dplyr::select(site_year, State, rye_bm_kg_ha)
+
+
+apsim_gaps_adj_mc <- apsim_yg_yields_adj_mc %>%
+  group_by(State, year_plant, soil_scenario, plant_scenario) %>%
+  mutate(yield_gap = yield_kg_ha[Tillage == "NT"]/yield_kg_ha[Tillage == "Till"],
+         water_frac_dif = frac_water[Tillage == "Till"]-frac_water[Tillage == "NT"])
+
+
+
+  
+
+adj_gaps_joined_mc <- left_join(apsim_gaps_adj_mc, obs_yg_adj) %>%
+  mutate(Year = as.numeric(year_plant),
+         site_year = paste0(State, "-",Year))
+
+obs_rain <- metagen_result_final %>%
+  filter(site_year %in% adj_gaps_joined_mc$site_year)
+
+gaps_prcp <- adj_gaps_joined_mc %>%
+  left_join(obs_rain, by ="site_year") 
+
+
+gaps_prcp %>%
+  ggplot(aes(x = plant_prcp, y = yield_gap.x)) +
+  geom_point(aes(colour = State.x)) +
+  facet_grid(cols = vars(soil_scenario), rows = vars(plant_scenario)) +
+  stat_poly_eq()
+
+mod_ef <- function(pred, obs){
+  mse = sum((pred-obs)^2)
+  mse_obs = sum((obs-mean(obs))^2)
+  ef = 1-(mse/mse_obs)
+}
+
+adj_gaps_yields_mc <- left_join(adj_gaps_joined_mc, proj_yields, by = c("State", "Tillage" = "Till_NT", "Year")) %>%
+  mutate(obs_yld = mean_yld) %>%
+  ungroup() %>%
+  group_by(soil_scenario, plant_scenario) %>%
+  mutate(rmse_gap = Metrics::rmse(yield_ratio, yield_gap),
+         rrmse_gap = rmse_gap/mean(yield_ratio),
+         rmse_yield = rmse(mean_yld, yield_kg_ha),
+         rrmse_yield = rmse_yield/mean(mean_yld),
+         ef_gap = mod_ef(pred = yield_gap, obs = yield_ratio),
+         ef_yield = mod_ef(pred = yield_kg_ha, obs = mean_yld),
+         soil_scenario = factor(soil_scenario, levels = c("High", "Med", "Low")),
+         plant_scenario = factor(plant_scenario, levels = c("PD", "SR")))
+
+# Graph comparing yields
+
+adj_soy_yield_mc_plot <- adj_gaps_yields_mc %>%
+  ggplot(aes(x = mean_yld, y = yield_kg_ha)) +
+  geom_point(size = 2, aes(colour = State)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_pubr() +
+  facet_grid(rows = vars(soil_scenario),cols = vars(plant_scenario)) +
+  scale_color_manual(values = c("red", "black")) +
+  coord_cartesian(ylim = c(1000, 5000), xlim = c(1000,5000)) +
+  geom_text(aes(label = paste0("RMSE = ", round(rmse_yield,2)), x = 1320, y = 4300), size = 4,inherit.aes = F) +
+  geom_text(aes(label = paste0("RRMSE = ", round(rrmse_yield*100,2),"%"), x = 1320, y = 3800), size = 4,inherit.aes = F) +
+  geom_text(aes(label = paste0("EF = ", round(ef_yield,2)), x = 1320, y = 3300), size = 4, inherit.aes = F) +
+  labs(x = "Observed soybean yield (kg/ha)", y = "Simulated soybean yield (kg/ha)", color = "", shape = "") +
+  geom_smooth(method = "lm", se = F, color = "gray", linetype = "dashed") +
+  stat_poly_eq(size = 4) +
+  theme(legend.text = element_text(size = 12),
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 14))
+
+ggsave(adj_soy_yield_mc_plot, filename = "Figures/yield_sim_obs_plot_mc.png",
+       dpi = 300, width = 12, height = 8, units = "in")
+
+gap_ratio_mc_plot <- adj_gaps_yields_mc %>%
+  ggplot(aes(x = yield_ratio, y = yield_gap)) +
+  geom_point(size = 3, aes(colour = State)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_pubr() +
+  facet_grid(rows = vars(soil_scenario) , cols = vars(plant_scenario)) +
+  scale_color_manual(values = c("red", "black")) +
+  coord_cartesian(ylim = c(0.5, 1.2), xlim = c(0.5,1.2)) +
+  labs(x = "Observed soybean yield gap", y = "Simulated soybean yield gap", color = "", shape = "") +
+  theme(legend.text = element_text(size = 16),
+        axis.title = element_text(size = 16),
+        axis.text = element_text(size = 16)) +
+  geom_text(aes(label = paste0("RMSE = ", round(rmse_gap,2)), x = 0.56, y = 1.1), size = 4,inherit.aes = F) +
+  geom_text(aes(label = paste0("RRMSE = ", round(rrmse_gap*100,2),"%"), x = 0.56, y = 1.04), size = 4,inherit.aes = F) +
+  geom_text(aes(label = paste0("EF = ", round(ef_gap,2)), x = 0.56, y = 0.98), size = 4, inherit.aes = F) +
+  stat_poly_eq(size = 4) 
+
+ggsave(gap_ratio_mc_plot, filename = "Figures/gap_sim_obs_plot_mc.png",
+       dpi = 300, width = 12, height = 8, units = "in")
+
+### Plot to look at water def and yield gap
+fasw_plot_ex <- adj_gaps_joined_mc %>%
+  ggplot(aes(x = water_frac_dif, y = yield_gap)) +
+  geom_point(size = 3, aes(colour = State, shape = plant_scenario)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_pubr() +
+  facet_grid(cols = vars(soil_scenario), rows = vars(plant_scenario)) +
+  geom_smooth(method = "lm", se = F) +
+  scale_color_manual(values = c("red", "black")) +
+  labs(x = "FASW NT - FASW Till", y = "Simulated soybean yield gap (NT:Till)", color = "", shape = "") +
+  theme(legend.text = element_text(size = 16),
+        axis.title = element_text(size = 16),
+        axis.text = element_text(size = 16)) +
+  stat_poly_eq(use_label("eq", "R2"), label.x = "right") 
+
+
+
+adj_gaps_pawc_mc <- adj_gaps_joined_mc %>%
+  left_join(paw_table, by = c("State", "soil_scenario")) %>%
+  group_by(State, year_plant, soil_scenario, plant_scenario) %>%
+  mutate(pawc_frac = pawc_mm*frac_water,
+         pawc_diff = pawc_frac[Tillage == "Till"]-pawc_frac[Tillage == "NT"],
+         pawc_frac_diff = pawc_diff/pawc_mm)
+
+
+till_nt_water <- adj_gaps_pawc_mc %>% 
+  ggplot(aes(x = pawc_diff, y = yield_gap)) +
+  geom_point(size = 3, aes(colour = State)) +
+ # geom_abline(slope = 1, intercept = 0) +
+  theme_bw() +
+  facet_grid(rows = vars(plant_scenario),cols = vars(soil_scenario), scales = "free_x") +
+  scale_color_manual(values = c("red", "black")) +
+  labs(x = "Till - NT PAW", y = "Simulated soybean yield gap (NT:Till)", color = "", shape = "") +
+  stat_poly_line(se = F) +
+  theme(legend.text = element_text(size = 16),
+        axis.title = element_text(size = 16),
+        axis.text = element_text(size = 16),
+        legend.position = "top") +
+  #annotate(geom = "text",label = paste0("RMSE = ", round(rmse_gap,2)), x = 0.6, y = 0.99, size = 5) +
+  #annotate(geom = "text",label = paste0("RRMSE = ", round(rrmse_gap*100,2),"%"), x = 0.6, y = 0.965, size = 5) +
+  stat_poly_eq(use_label("eq", "R2"), label.x = "right", label.y = "top") 
+ggsave(till_nt_water, filename = "Figures/tnt_water_graph_example.png", dpi = 300,
+       width = 9, height = 6, units = "in")
+
+##theme_linedraw()#### Checking phenology comparison of APSIM to Liebert data
+obs_rye_phen <- read_xlsx("~/Downloads/rye_exp_197.xlsx", sheet = "Sheet1") %>%
+  dplyr::select(Clock.Today, zadoks) %>%
+  rename("zadok_obs" = zadoks) 
+
+
+phen_rye <- read_xlsx("~/Downloads/rye_exp_197.xlsx", sheet = "Report") %>%
+  dplyr::select(Clock.Today, zadok) %>% 
+  filter(Clock.Today %in% obs_rye_phen$Clock.Today) %>%
+  rename("zadok_sim" = zadok)
+
+obs_sim_rye_phen <- left_join(obs_rye_phen, phen_rye)
+
+rrmse_rye_phen <- round((Metrics::rmse(obs_sim_rye_phen$zadok_obs, obs_sim_rye_phen$zadok_sim)/mean(obs_sim_rye_phen$zadok_obs))*100,2)
+pred_obs_rye_phen <- obs_sim_rye_phen %>%
+  ggplot(aes(x = zadok_obs, y = zadok_sim)) +
+  geom_point(size = 2.5) +
+  geom_abline() +
+  theme_pubr() +
+  stat_poly_eq(size = 5) +
+  annotate("text", x = 35, y = 69, label = paste0("RRMSE =",rrmse_rye_phen,"%"), size = 5) +
+  labs(x = "Observed zadoks stage", y = "Simulated zadoks stage") +
+  theme(axis.text = element_text(size = 14),
+        axis.title = element_text(size = 14))
+
+ggsave(pred_obs_rye_phen, filename = "Figures/cr_pred_obs_phenology.png",
+       dpi = 300, width = 9, height = 6, units = "in")
+#### Liner mixed models with APSIM data
+
+def_mod_apsim <- lmer(yield_gap ~ water_frac_dif * as.factor(soil_scenario) * as.factor(plant_scenario) + (1|State), data = adj_gaps_yields)
+
+emm_def_apsim <- emmeans(def_mod_apsim, ~as.factor(soil_scenario)*as.factor(plant_scenario), adjust = "sidak")
+pairs(emm_def_apsim)
+emm_trends_apsim <- emtrends(def_mod_apsim, ~ as.factor(soil_scenario) * as.factor(plant_scenario), var = "water_frac_dif")
+plot(emm_trends_apsim)
+
+pairs(emm_trends_apsim)
+pairs(emm_trends_apsim)
+
+
+
+```
+
+```{r APSIM Factorial Experiment}
+
+apsim_factorial <- read_xlsx("factorial_scenario_analysis.xlsx", sheet = "Report")
+
+
+apsim_factorial <- apsim_factorial %>%
+  mutate(swat_scenario = word(Zone, -1),
+         state = case_when(
+           startsWith(Zone, "Wisconsin") ~ "Wisconsin",
+           startsWith(Zone, "New York") ~ "New York"
+         ),
+         swat_scenario = case_when(
+           swat_scenario == "25" ~ "25%",
+           swat_scenario == "50" ~ "50%",
+           swat_scenario == "75" ~ "75%",
+           swat_scenario == "Full" ~ "100%"
+         ),
+         swat_scenario = factor(swat_scenario, levels = c("100%", "75%", "50%", "25%")),
+         plant_population = 10000*as.numeric(Pop))
+
+apsim_factorial %>%
+  #separate_wider_delim()
+  #group_by(Experiment, Pop, Zone,Clock.Today.Year) %>%
+  #dplyr::summarise(mean_soy = mean(soy_kg_ha)) %>%
+  filter(state == "New York") %>%
+  ggplot(aes(x = factor(Clock.Today.Year), y = soy_kg_ha, fill = swat_scenario)) +
+  geom_boxplot(position = position_dodge()) +
+  scale_fill_brewer(palette = "Set3") +
+  facet_wrap(~plant_population) +
+  theme_pubr() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5),
+        legend.position = "top") +
+  labs(y = "Soybean yield (kg/ha)", x = "Year", fill = "")
+
+ap_fac_mod <- lmer(soy_kg_ha ~ (Pop*swat_scenario*Date*state) + (1|state), data = apsim_factorial)
+summary(ap_fac_mod)
+check_model(ap_fac_mod)
+
+emm_fac_apsim <- emmeans(ap_fac_mod, ~(swat_scenario*Pop)|state)
+
+multcomp::cld(emm_fac_apsim,
+              Letters = "abcdefghijklmn", 
+              reversed = T)
+
+pairs(emm_fac_apsim)
+
+contrast(emm_fac_apsim,
+         method = "trt.vs.ctrl",
+         ref = "100% Pop61.8")
+
+
+emm_fac_pop_by_swat <- emmeans(ap_fac_mod, ~(Pop|swat_scenario)|state)
+emm_pop_by_swat_pair <- pairs(emm_fac_pop_by_swat)
+#### Factorial experiment based on rye vwc results 
+
+apsim_factorial_rye_water <- read_xlsx("~/Downloads/factorial_with_rye_water.xlsx", sheet = "Report")
+
+
+apsim_factorial_rye_water <- apsim_factorial_rye_water %>%
+  mutate(swat_scenario = word(Zone, -1),
+         state = case_when(
+           startsWith(Zone, "Wisconsin") ~ "Wisconsin",
+           startsWith(Zone, "New York") ~ "New York"
+         ),
+         swat_scenario = case_when(
+           swat_scenario == "95" ~ "97.5%",
+           swat_scenario == "75" ~ "75%",
+           swat_scenario == "50" ~ "50%",
+           swat_scenario == "25" ~ "25%",
+           swat_scenario == "5" ~ "2.5%"
+         ),
+         swat_scenario = factor(swat_scenario, levels = c("97.5%", "75%", "50%", "25%", "2.5%")),
+         plant_population = 10000*as.numeric(Pop),
+         rye_bin = case_when(
+           between(as.numeric(Bm), 1000, 4000) ~ "Low cereal rye",
+           between(as.numeric(Bm), 5000, 8000) ~ "Middle cereal rye",
+           between(as.numeric(Bm), 9000, 12000) ~ "High cereal rye",
+         ),
+         tillage = case_when(
+           endsWith(Experiment, "Till") ~ "Till",
+           endsWith(Experiment, "NT") ~ "NT"
+         )) %>%
+  filter(tillage == "NT")
+
+lm_pop_wat_simp <- lmer(soy_kg_ha ~ (Pop+swat_scenario)*state + (1|state), data = apsim_factorial_rye_water)
+
+pop_wat_letters <-emmeans(lm_pop_wat_simp, ~ ~(Pop+swat_scenario)|state, type = "response") %>% 
+  cld(Letters = "abcdefghijklmnop", reversed = TRUE, adjust = "bonferroni") %>% 
+  as_tibble() %>% 
+  mutate(.group = trimws(.group))
+
+MeanPlusSe <- function(x) mean(x, na.rm = TRUE) + plotrix::std.error(x, na.rm = TRUE)
+
+ny_fac_ex_plot <- left_join(pop_wat_letters, apsim_factorial_rye_water) %>%
+  ggplot(aes(x = Pop, y = soy_kg_ha, fill = swat_scenario)) +
+  stat_summary(geom = "col", fun = "mean" ,position = position_dodge(), color = "black") +
+  stat_summary(geom = "errorbar", fun.data = "mean_se" ,position = position_dodge(width = 0.9), width = 0.3) +
+  stat_summary(geom = "text", fun = "MeanPlusSe", aes(label =.group), vjust = -0.8, size = 4, position = position_dodge(width = 0.9)) +
+  scale_fill_brewer(palette = "Set3") + 
+  facet_grid(cols = vars(state)) +
+  theme_pubr() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5),
+        legend.position = "top") +
+  labs(y = "Soybean yield (kg/ha)", x = "Plant population (plants/ha)", fill = "")
+ggsave(ny_fac_ex_plot, filename = "Figures/ny_fac_ppop_swat.png", dpi = 300,
+       height = 6, width = 12, units = "in")
+##### Chat recommendation
+# 1) prepare data: treat Pop as categorical for plotting/comparisons
+df <- apsim_factorial_rye_water %>%
+  mutate(
+    Pop = factor(Pop),
+    swat_scenario = factor(swat_scenario),
+    state = factor(state),
+    site_year = paste0(state, Clock.Today.Year)
+  )
+
+# 2) fit model
+# OPTION A (recommended for within-state contrasts): treat state as a fixed effect
+lm_pop_wat_simp <- lmer(soy_kg_ha ~ Pop * swat_scenario * state + (1|state:site_year), data = df)
+
+# (If you truly need state as a random effect instead, use: 
+# lm_pop_wat_simp <- lmer(soy_kg_ha ~ Pop * swat_scenario + (1|state), data = df)
+# but then interpret CLDs carefully — see notes below.)
+
+# 3) emmeans for Pop x swat_scenario *within each state*
+emm <- emmeans(lm_pop_wat_simp, ~ Pop * swat_scenario | state, type = "response")
+
+# compute CLD letters (no ~ funny business)
+pop_wat_letters <- cld(emm,
+                       Letters = "abcdefghijklmnop",
+                       adjust = "bonferroni",
+                       reversed = TRUE) %>%
+  as_tibble() %>%
+  mutate(.group = trimws(.group))
+
+
+# 4) compute a summary dataframe (means, SE, 95% CI) from the raw data
+summary_df <- df %>%
+  group_by(state, Pop, swat_scenario) %>%
+  summarise(
+    mean = mean(soy_kg_ha, na.rm = TRUE),
+    sd = sd(soy_kg_ha, na.rm = TRUE),
+    n = sum(!is.na(soy_kg_ha)),
+    se = sd / sqrt(n),
+    df = n - 1,
+    lower = mean - qt(0.975, df) * se,
+    upper = mean + qt(0.975, df) * se,
+    .groups = "drop"
+  )
+
+# 5) join letters (one row per group)
+plot_df <- left_join(summary_df, pop_wat_letters,
+                     by = c("state", "Pop", "swat_scenario"))
+
+# small vertical offset for letters (2% of y-range)
+yrange <- max(plot_df$upper, na.rm = TRUE) - min(plot_df$lower, na.rm = TRUE)
+plot_df <- plot_df %>% mutate(letter_y = upper + 0.02 * yrange)
+
+# 6) plot with consistent dodging
+ny_fac_ex_plot <- ggplot(plot_df, aes(x = Pop, y = mean, fill = swat_scenario)) +
+  geom_col(position = position_dodge(width = 0.9), color = "black") +
+  geom_errorbar(aes(ymin = lower, ymax = upper),
+                position = position_dodge(width = 0.9),
+                width = 0.25) +
+  geom_text(aes(label = .group, y = letter_y),
+            position = position_dodge(width = 0.9),
+            vjust = 0,
+            size = 4) +
+  facet_grid(cols = vars(state)) +
+  scale_fill_brewer(palette = "Set3") +
+  theme_pubr() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5),
+        legend.position = "top") +
+  labs(y = "Soybean yield (kg/ha)", x = "Plant population (plants/ha)", fill = "")
+
+ny_fac_ex_plot
+
+
+#####
+
+
+wi_fac_ex_plot <- apsim_factorial_rye_water %>%
+  filter(state == "Wisconsin",
+         tillage == "NT") %>%
+  ggplot(aes(x = factor(Clock.Today.Year), y = soy_kg_ha, fill = factor(plant_population))) +
+  geom_boxplot(position = position_dodge()) +
+  scale_fill_brewer(palette = "Set3") +
+  facet_grid(cols = vars(swat_scenario)) +
+  theme_pubr() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5),
+        legend.position = "top") +
+  labs(y = "Soybean yield (kg/ha)", x = "Year", fill = "")
+ggsave(wi_fac_ex_plot, filename = "Figures/wi_fac_ppop_swat.png", dpi = 300,
+       height = 6, width = 12, units = "in")
+
+
+ap_rye_wat_mod <- lmer(soy_kg_ha ~ (rye_bin*swat_scenario*Pop*state) + (1|state), data = apsim_factorial_rye_water)
+summary(ap_rye_wat_mod)
+check_model(ap_rye_wat_mod)
+
+#### Looking at some random forest
+
+library(caret)
+library(randomForest)
+ap_fac_rye_water_rf_ny <- apsim_factorial_rye_water %>%
+  filter(tillage == "NT",
+         state == "New York") %>%
+  mutate(Date = factor(Date, levels = c("20-may", "25-may", "30-may", "4-jun",  "9-jun", "14-jun")),
+         Pop = factor(Pop),
+         Bm = factor(Bm, levels = c("1000", "3000", "5000","7000", "9000", "11000")),
+         swat_scenario = factor(swat_scenario))
+  
+
+set.seed(123)
+train_index <- createDataPartition(ap_fac_rye_water_rf_ny$soy_kg_ha, p = 0.7, list = FALSE)
+train_data <- ap_fac_rye_water_rf_ny[train_index, ]
+test_data  <- ap_fac_rye_water_rf_ny[-train_index, ]
+
+# Define training control (cross-validation)
+ctrl <- trainControl(method = "cv",  # k-fold cross-validation
+                     number = 5,     # number of folds
+                     verboseIter = TRUE)
+
+# Train random forest model
+set.seed(123)
+rf_model <- randomForest(soy_kg_ha ~ Pop + Date + Bm + swat_scenario, 
+                  data = train_data,
+                  method = "rf",
+                  trControl = ctrl,
+                  tuneLength = 5,   # number of mtry values to try
+                  importance = TRUE)
+
+# View model results
+print(rf_model)
+plot(rf_model)
+
+# Variable importance
+varImpPlot(rf_model)
+
+importance(rf_model)
+
+# Predict on test set
+predictions <- predict(rf_model, newdata = test_data)
+
+
+###
+
+emm_rye_wat_swat_by_pop <- emmeans(ap_rye_wat_mod, ~(swat_scenario+Pop+rye_bin)|state)
+
+emm_rye_wat_swat_by_pop@levels
+
+contrast(emm_rye_wat_swat_by_pop,
+         method = "trt.vs.ctrl",
+         ref = "50% Pop61.8 Middle cereal rye")
+
+emm_swat_by_pop_pair <- pairs(emm_rye_wat_swat_by_pop)
+emm_rye_wat_pop_by_swat <- emmeans(ap_rye_wat_mod, ~(Pop|swat_scenario)|state)
+emm_pop_by_swat_pair <- pairs(emm_rye_wat_pop_by_swat)
+
+
+multcomp::cld(emm_rye_wat_swat_by_pop,
+              Letters = "abcdefghijklmn", 
+              reversed = T)
+#### Checking out variation in soil water withdrawl of cereal rye across management scenarios
+vwc_ny <- clean_names(read_xlsx("~/Downloads/rye_exp_197.xlsx", sheet = "Report")) %>%
+  pivot_longer(cols = soil_vwc_1:soil_vwc_7, values_to = "vwc_val", names_to = "vwc_wat") %>%
+  mutate(layer = case_when(endsWith(vwc_wat, "_1") ~ "1",
+    endsWith(vwc_wat, "_2") ~ "2",
+    endsWith(vwc_wat, "_3") ~ "3",
+    endsWith(vwc_wat, "_4") ~ "4",
+    endsWith(vwc_wat, "5") ~ "5",
+    endsWith(vwc_wat, "6") ~ "6",
+    endsWith(vwc_wat, "7") ~"7")) %>%
+  group_by(simulation_name, clock_today_year) %>%
+  mutate(paw_prox = sum(vwc_val))
+
+
+ny_vwc_quantiles <- vwc_ny %>%
+  group_by(layer) %>%
+  summarise(vwc_5 = quantile(vwc_val, probs = 0.025),
+            vwc_25 = quantile(vwc_val, probs = 0.25),
+            vwc_50 = quantile(vwc_val, probs = 0.5),
+            vwc_75 = quantile(vwc_val, probs = 0.75),
+            vwc_95 = quantile(vwc_val, probs = 0.975))
+
+ecdf_rye <- ecdf(vwc_ny$rye_kg_ha)
+
+ecdf_rye(6000)
+
+vwc_ny %>%
+  ggplot(aes(x = vwc_val)) +
+  geom_histogram() +
+  facet_wrap(~layer)
+
+vwc_ny
+
+ny_rye_quantiles <- vwc_ny %>%
+  summarise(vwc_5 = quantile(rye_kg_ha, probs = 0.025),
+            vwc_50 = quantile(rye_kg_ha, probs = 0.50),
+            vwc_95 = quantile(rye_kg_ha, probs = 0.975))
+
+ny_rye_cn <- vwc_ny %>%
+  summarise(vwc_5 = quantile(c_to_n, probs = 0.025),
+            vwc_50 = quantile(c_to_n, probs = 0.5),
+            vwc_95 = quantile(c_to_n, probs = 0.975))
+
+
+vwc_wi <-clean_names(read_xlsx("~/Downloads/rye_exp_197.xlsx", sheet = "ReportWI")) %>%
+  pivot_longer(cols = soil_vwc_1:soil_vwc_13, values_to = "vwc_val", names_to = "vwc_wat") %>%
+  mutate(layer = case_when(
+    endsWith(vwc_wat, "_1") ~ "1",
+    endsWith(vwc_wat, "_2") ~ "2",
+    endsWith(vwc_wat, "_3") ~ "3",
+    endsWith(vwc_wat, "_4") ~ "4",
+    endsWith(vwc_wat, "5") ~ "5",
+    endsWith(vwc_wat, "6") ~ "6",
+    endsWith(vwc_wat, "7") ~"7",
+    endsWith(vwc_wat, "8") ~ "8",
+    endsWith(vwc_wat, "9") ~ "9",
+    endsWith(vwc_wat, "_10") ~ "10",
+    endsWith(vwc_wat, "_11") ~ "11",
+    endsWith(vwc_wat, "_12") ~ "12",
+    endsWith(vwc_wat, "_13") ~ "13"
+  ),
+  layer = factor(layer,levels = c("1","2","3","4","5","6","7","8","9","10","11","12","13")))
+
+
+
+range(vwc_ny$soil_vwc_6)
+  
+vwc_ny %>%
+  ggplot(aes(x = factor(fasw_wat), y = fasw_val)) +
+  geom_boxplot(position = position_dodge()) +
+  geom_boxplot(position = position_dodge()) +
+  scale_fill_brewer(palette = "Set3") +
+  theme_pubr() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5),
+        legend.position = "top") +
+  labs(y = "Percent water capacity", x = "Layer of soil", fill = "")
+
+vwc_wi %>%
+  ggplot(aes(x = layer, y = vwc_val)) +
+  geom_boxplot(position = position_dodge()) +
+  geom_boxplot(position = position_dodge()) +
+  scale_fill_brewer(palette = "Set3") +
+  theme_pubr() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5),
+        legend.position = "top") +
+  labs(y = "Percent water capacity", x = "Layer of soil", fill = "")
+
+wi_vwc_quantiles <- vwc_wi %>%
+  group_by(layer) %>%
+  summarise(vwc_5 = quantile(vwc_val, probs = 0.025),
+            vwc_25 = quantile(vwc_val, probs = 0.25),
+            vwc_50 = quantile(vwc_val, probs = 0.5),
+            vwc_75 = quantile(vwc_val, probs = 0.75),
+            vwc_95 = quantile(vwc_val, probs = 0.975))
+
+wi_rye_quantiles <- vwc_wi %>%
+  summarise(rye_5= quantile(rye_kg_ha, probs = 0.025),
+            rye_50 = quantile(rye_kg_ha, probs = 0.5),
+            rye_95 = quantile(rye_kg_ha, probs = 0.975))
+
+wi_rye_cn <- vwc_wi %>%
+  summarise(rye_5= quantile(c_to_n, probs = 0.025),
+            rye_50 = quantile(c_to_n, probs = 0.5),
+            rye_95 = quantile(c_to_n, probs = 0.975))
+
+#### Same as above but for tilled scenarios
+
+vwc_ny_till <- clean_names(read_xlsx("~/Downloads/till_soy_swat.xlsx", sheet = "Report")) %>%
+  pivot_longer(cols = soil_vwc_1:soil_vwc_7, values_to = "vwc_val", names_to = "vwc_wat") %>%
+  mutate(layer = case_when(endsWith(vwc_wat, "_1") ~ "1",
+    endsWith(vwc_wat, "_2") ~ "2",
+    endsWith(vwc_wat, "_3") ~ "3",
+    endsWith(vwc_wat, "_4") ~ "4",
+    endsWith(vwc_wat, "5") ~ "5",
+    endsWith(vwc_wat, "6") ~ "6",
+    endsWith(vwc_wat, "7") ~"7"))
+
+
+
+
+ny_vwc_quantiles_till <- vwc_ny_till %>%
+  group_by(layer) %>%
+  summarise(vwc_5 = quantile(vwc_val, probs = 0.025),
+            vwc_25 = quantile(vwc_val, probs = 0.25),
+            vwc_50 = quantile(vwc_val, probs = 0.5),
+            vwc_75 = quantile(vwc_val, probs = 0.75),
+            vwc_95 = quantile(vwc_val, probs = 0.975))
+
+
+vwc_wi_till <-clean_names(read_xlsx("~/Downloads/till_soy_swat.xlsx", sheet = "ReportWI")) %>%
+  pivot_longer(cols = soil_vwc_1:soil_vwc_13, values_to = "vwc_val", names_to = "vwc_wat") %>%
+  mutate(layer = case_when(
+    endsWith(vwc_wat, "_1") ~ "1",
+    endsWith(vwc_wat, "_2") ~ "2",
+    endsWith(vwc_wat, "_3") ~ "3",
+    endsWith(vwc_wat, "_4") ~ "4",
+    endsWith(vwc_wat, "5") ~ "5",
+    endsWith(vwc_wat, "6") ~ "6",
+    endsWith(vwc_wat, "7") ~"7",
+    endsWith(vwc_wat, "8") ~ "8",
+    endsWith(vwc_wat, "9") ~ "9",
+    endsWith(vwc_wat, "_10") ~ "10",
+    endsWith(vwc_wat, "_11") ~ "11",
+    endsWith(vwc_wat, "_12") ~ "12",
+    endsWith(vwc_wat, "_13") ~ "13"
+  ),
+  layer = factor(layer,levels = c("1","2","3","4","5","6","7","8","9","10","11","12","13")))
+
+
+
+
+wi_vwc_quantiles_till <- vwc_wi_till %>%
+  group_by(layer) %>%
+  summarise(vwc_5 = quantile(vwc_val, probs = 0.025),
+            vwc_25 = quantile(vwc_val, probs = 0.25),
+            vwc_50 = quantile(vwc_val, probs = 0.5),
+            vwc_75 = quantile(vwc_val, probs = 0.75),
+            vwc_95 = quantile(vwc_val, probs = 0.975))
 
 
 ```
